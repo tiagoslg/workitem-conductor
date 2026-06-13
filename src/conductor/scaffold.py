@@ -63,8 +63,10 @@ steps:
     stage: implementing
   - role: reviewer
     stage: reviewing
-  # If the reviewer reports blockers, the conductor loops back to the
-  # implementer in `fixing` stage, then re-reviews, up to max_fix_iterations.
+    # On a `changes_requested` verdict the conductor loops back to the
+    # implementer (stage `fixing`) and re-reviews, up to max_fix_iterations.
+    gate: review
+    on_changes: implementer
   - role: validator
     stage: validating
 max_fix_iterations: 3
@@ -123,14 +125,21 @@ REVIEWER_MD = """\
 You review the implementation against the goal contract and the plan.
 
 ## Output
-A review that clearly states one of:
-- approved — acceptance criteria met, no blocking issues;
-- changes requested — a short, explicit list of blocking issues to fix.
+A review that ends with exactly one verdict line, on its own line:
+
+    REVIEW: approved
+    REVIEW: changes_requested
+
+- `approved` — acceptance criteria met, no blocking issues;
+- `changes_requested` — precede the line with a short, explicit list of
+  blocking issues to fix. The conductor loops back to the implementer with
+  your feedback, up to the flow's max fix iterations.
 
 ## Rules
 - be specific and actionable; each blocker should be independently fixable;
 - check correctness against acceptance criteria first, then quality;
 - do not request changes outside the approved scope;
+- always emit the verdict line — it drives the fix loop;
 - if you and the implementer disagree irreconcilably, flag it for the human.
 """
 

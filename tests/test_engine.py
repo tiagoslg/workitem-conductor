@@ -31,7 +31,7 @@ def test_load_flow_missing(paths: AiPaths):
         load_flow(paths, "no-such-flow")
 
 
-def test_dryrun_provider_echoes_prompt():
+def test_dryrun_provider_returns_placeholder():
     provider = DryRunProvider()
     result = provider.run(
         ProviderRequest(role="planner", prompt="PROMPT-BODY", workitem_id="wi", cwd=Path("."))
@@ -39,7 +39,9 @@ def test_dryrun_provider_echoes_prompt():
     assert isinstance(result, ProviderResult)
     assert result.ok
     assert result.provider == "dry_run"
-    assert "PROMPT-BODY" in result.output
+    assert "planner" in result.output
+    # must not echo the prompt verbatim (would confuse the review gate)
+    assert "PROMPT-BODY" not in result.output
 
 
 def test_engine_runs_full_flow(paths: AiPaths):
@@ -96,6 +98,84 @@ def test_engine_later_step_sees_prior_output(paths: AiPaths):
     impl_prompt = (wi.directory / "outputs" / "01-implementer.prompt.md").read_text()
     assert "Prior step outputs" in impl_prompt
     assert "00-planner.output.md" in impl_prompt
+
+
+class ScriptedReviewer(DryRunProvider):
+    """Provider whose reviewer emits a scripted sequence of verdicts."""
+
+    name = "scripted"
+
+    def __init__(self, verdicts):
+        self.verdicts = verdicts
+        self.review_calls = 0
+
+    def run(self, request):
+        if request.role == "reviewer":
+            verdict = self.verdicts[min(self.review_calls, len(self.verdicts) - 1)]
+            self.review_calls += 1
+            return ProviderResult(
+                ok=True,
+                output=f"review body\nREVIEW: {verdict}\n",
+                provider=self.name,
+            )
+        return ProviderResult(ok=True, output=f"# {request.role}\noutput", provider=self.name)
+
+
+def test_fix_loop_resolves_after_changes(paths: AiPaths):
+    wi = create_workitem(paths, "fix loop")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    reviewer = ScriptedReviewer(["changes_requested", "changes_requested", "approved"])
+
+    engine = Engine(paths, flow, provider_for=lambda role: reviewer)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is True
+    roles = [s.role for s in outcome.steps]
+    assert roles == [
+        "planner", "implementer", "reviewer",
+        "implementer", "reviewer",
+        "implementer", "reviewer",
+        "validator",
+    ]
+
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.fix_iterations == 2
+    assert reloaded.state.status == "completed"
+    # outputs are sequence-numbered, preserving the fix history
+    out_dir = wi.directory / "outputs"
+    assert (out_dir / "03-implementer.output.md").is_file()
+    assert (out_dir / "06-reviewer.output.md").is_file()
+
+
+def test_fix_loop_stops_at_max_iterations(paths: AiPaths):
+    wi = create_workitem(paths, "endless changes")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")  # max_fix_iterations = 3
+    reviewer = ScriptedReviewer(["changes_requested"])  # never approves
+
+    engine = Engine(paths, flow, provider_for=lambda role: reviewer)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is False
+    assert "fix iteration" in outcome.stopped_reason
+
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.status == "needs_human"
+    assert reloaded.state.stage == "blocked"
+    assert reloaded.state.fix_iterations == 3
+    assert any("fix iteration" in i for i in reloaded.state.open_issues)
+
+
+def test_dry_run_passes_review_gate(paths: AiPaths):
+    # dry-run reviewer emits no verdict -> unknown -> treated as approved
+    wi = create_workitem(paths, "dry passes gate")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    engine = Engine(paths, flow, provider_for=lambda role: DryRunProvider())
+    outcome = engine.run(wi.workitem_id)
+    assert outcome.completed is True
+    assert load_workitem(paths, wi.workitem_id).state.fix_iterations == 0
 
 
 def test_engine_stops_on_provider_failure(paths: AiPaths):

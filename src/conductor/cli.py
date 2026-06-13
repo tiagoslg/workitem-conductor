@@ -248,8 +248,14 @@ def execute(
     def on_step(step: StepOutcome) -> None:
         mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
         rel = step.output_path.relative_to(wi.directory).as_posix()
+        extra = ""
+        if step.verdict and step.verdict != "unknown":
+            color = "green" if step.verdict == "approved" else "yellow"
+            extra = f" [{color}]{step.verdict}[/{color}]"
+            if step.looped_back:
+                extra += " [dim]↩ fixing[/dim]"
         console.print(
-            f"  {mark} {step.role} [dim]({step.stage} · {step.provider})[/dim] → {rel}"
+            f"  {mark} {step.role} [dim]({step.stage} · {step.provider})[/dim] → {rel}{extra}"
         )
 
     try:

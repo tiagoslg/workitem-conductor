@@ -109,12 +109,15 @@ designed to grow toward the execution loop without restructuring.
     with no binding fall back to dry-run; `execute --dry-run` forces dry-run.
     The conductor does **not** own provider authentication — CLIs are
     configured (and logged in) outside it.
-  - *slice 2b (next):* the review/fix back-edge and stop conditions
-    (max iterations, repeated blocker, scope/secret/prod guards). Future
-    provider types: `cli_pty`, `api`, `ollama`.
-- **MVP 3 — sessions/sandbox:** git worktrees, generated docker-compose,
-  dynamic ports and smoke tests. The workitem (memory/state) is already
-  separated from the session (runtime), so this is additive.
+  - *slice 2b (done):* the review/fix back-edge and stop conditions. A
+    review-gated step parses a `REVIEW: approved` / `REVIEW: changes_requested`
+    verdict from the reviewer; on changes the loop returns to the implementer
+    (stage `fixing`) up to `max_fix_iterations`, then stops for the human.
+- **MVP 3 — sessions/sandbox & richer providers:** `cli_pty`, `api` and
+  `ollama` provider types; git worktrees, generated docker-compose, dynamic
+  ports and smoke tests; semantic stop conditions (scope change, secrets/prod
+  access, reviewer/implementer deadlock). The workitem (memory/state) is
+  already separated from the session (runtime), so this is additive.
 
 ## Design principle
 

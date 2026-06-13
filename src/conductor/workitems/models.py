@@ -98,6 +98,7 @@ class WorkitemState(BaseModel):
     next_action: str = "approve_goal"
     step_index: int = 0
     iterations: int = 0
+    fix_iterations: int = 0
     open_issues: list[str] = Field(default_factory=list)
     human_overrides: list[str] = Field(default_factory=list)
     artifacts: dict[str, str | None] = Field(default_factory=dict)

@@ -15,11 +15,12 @@ class DryRunProvider(Provider):
     name = "dry_run"
 
     def run(self, request: ProviderRequest) -> ProviderResult:
+        # Deliberately does not echo the prompt: the prompt is already saved
+        # alongside as the step's .prompt.md, and echoing the reviewer's role
+        # instructions (which contain REVIEW: examples) would confuse the gate.
         output = (
             f"# [dry-run] {request.role}\n\n"
-            f"No model was called. A real provider would act on the prompt below "
-            f"and return its work product here.\n\n"
-            f"<details>\n<summary>prompt sent to the {request.role}</summary>\n\n"
-            f"```\n{request.prompt}\n```\n\n</details>\n"
+            f"No model was called. A real provider would act on this role's prompt "
+            f"(see the matching `.prompt.md`) and return its work product here.\n"
         )
         return ProviderResult(ok=True, output=output, provider=self.name)
