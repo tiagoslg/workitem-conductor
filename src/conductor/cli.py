@@ -15,7 +15,10 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from .core.engine import Engine, GoalNotApproved, StepOutcome
+from .flows.loader import FlowNotFound, load_flow
 from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, require_ai_paths
+from .providers.dryrun import DryRunProvider
 from .scaffold import scaffold_ai
 from .workitems.manager import (
     approve_goal,
@@ -193,20 +196,65 @@ def status(
 
 
 @app.command()
-def execute() -> None:
-    """Run the workitem flow (provider execution — coming in MVP 2)."""
+def execute(
+    workitem_id: str = typer.Argument(
+        None, help="Workitem to execute (defaults to the active one)."
+    ),
+) -> None:
+    """Run the workitem flow.
+
+    Provider execution is dry-run for now (MVP 2 slice 1): the loop, context
+    building, state transitions and artifacts are real; no model is called yet.
+    Real CLI/API providers arrive in the next slice.
+    """
     paths = _load_paths()
-    active = get_active_id(paths)
-    console.print("[yellow]Execution is not implemented yet (MVP 2).[/yellow]\n")
-    console.print("Planned loop for the [bold]simple-change[/bold] flow:")
-    console.print("  plan → implement → review → (fix → review)* → validate → final report")
+    wid = workitem_id or get_active_id(paths)
+    if wid is None:
+        err_console.print(
+            "[red]No workitem to execute.[/red]  Run `conductor define \"<goal>\"` first."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    try:
+        flow = load_flow(paths, wi.state.flow)
+    except FlowNotFound as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    provider = DryRunProvider()
+    engine = Engine(paths, flow, provider_for=lambda role: provider)
+
     console.print(
-        "\nThe conductor will own this loop: select the next role, build context,\n"
-        "call the configured provider, capture output, update state, and stop at a\n"
-        "stop condition or final validation."
+        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan] "
+        f"· provider [yellow]{provider.name}[/yellow]\n"
     )
-    if active:
-        console.print(f"\nActive workitem ready to drive: [bold]{active}[/bold]")
+
+    def on_step(step: StepOutcome) -> None:
+        mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
+        rel = step.output_path.relative_to(wi.directory).as_posix()
+        console.print(f"  {mark} {step.role} [dim]({step.stage})[/dim] → {rel}")
+
+    try:
+        outcome = engine.run(wid, on_step=on_step)
+    except GoalNotApproved as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    if outcome.completed:
+        console.print(
+            f"\n[green]Flow completed.[/green] Final report: "
+            f"[bold].ai/workitems/{wid}/final_report.md[/bold]"
+        )
+        console.print("Review it, then accept or reopen the workitem.")
+    else:
+        console.print(f"\n[yellow]Stopped:[/yellow] {outcome.stopped_reason}")
+        raise typer.Exit(code=1)
 
 
 @app.command()

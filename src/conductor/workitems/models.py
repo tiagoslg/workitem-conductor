@@ -96,6 +96,7 @@ class WorkitemState(BaseModel):
     stage: str = "defined"
     status: str = "draft"
     next_action: str = "approve_goal"
+    step_index: int = 0
     iterations: int = 0
     open_issues: list[str] = Field(default_factory=list)
     human_overrides: list[str] = Field(default_factory=list)

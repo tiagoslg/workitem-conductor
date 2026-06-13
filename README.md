@@ -44,7 +44,7 @@ conductor define "fix the policy discovery bug"
 #   edit .ai/workitems/<id>/goal.yml — scope, acceptance criteria, stop conditions
 conductor approve              # mark the goal approved & ready to execute
 conductor status               # show the active workitem
-conductor execute              # run the flow (provider execution: MVP 2)
+conductor execute              # run the flow end-to-end (dry-run providers for now)
 conductor doctor               # check prerequisites and provider CLIs
 ```
 
@@ -77,13 +77,18 @@ designed to grow toward the execution loop without restructuring.
 
 ## Roadmap
 
-- **MVP 1 (this milestone):** `init` + `define` + `status` with an explicit
+- **MVP 1 (done):** `init` + `define` + `approve` + `status` with an explicit
   state model and artifact layout.
-- **MVP 2 — execution loop:** provider adapters (`cli_one_shot`, `cli_pty`,
-  `api`, `ollama`) and a `core` engine that selects the next role, builds
-  context, calls the provider, captures output, updates state, and stops at a
-  stop condition. The conductor does **not** own provider authentication —
-  CLIs are configured (and logged in) outside it.
+- **MVP 2 — execution loop:**
+  - *slice 1 (done):* `flows` loader, a `Provider` interface with a
+    `DryRunProvider`, a context builder, and a `core` engine that drives the
+    flow — selecting each role, building its context, capturing output as
+    artifacts, advancing state, and writing a final report. `conductor execute`
+    runs this loop end-to-end without calling a real model yet.
+  - *slice 2 (next):* real provider adapters (`cli_one_shot`, `cli_pty`, `api`,
+    `ollama`), a role→provider registry from `repo.yml`, the review/fix
+    back-edge, and stop conditions. The conductor does **not** own provider
+    authentication — CLIs are configured (and logged in) outside it.
 - **MVP 3 — sessions/sandbox:** git worktrees, generated docker-compose,
   dynamic ports and smoke tests. The workitem (memory/state) is already
   separated from the session (runtime), so this is additive.
