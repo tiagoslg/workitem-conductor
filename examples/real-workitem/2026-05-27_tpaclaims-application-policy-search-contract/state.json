@@ -1,0 +1,91 @@
+{
+  "work_item_id": "2026-05-27_tpaclaims-application-policy-search-contract",
+  "title": "Application-scoped TPA Claims policy search contract",
+  "profile": "governed",
+  "repo": "habit-tpaclaims-pyservice-layer",
+  "branch": "feature/tpaclaims-operator-policy-claim-opening",
+  "branch_source": "main",
+  "repositories": [
+    {
+      "repo": "habit-tpaclaims-pyservice-layer",
+      "branch": "feature/tpaclaims-operator-policy-claim-opening",
+      "source_branch": "main",
+      "role": "primary",
+      "changed": true,
+      "commit": "d813c4c",
+      "deployed": false,
+      "deployment_environment": null
+    },
+    {
+      "repo": "habit-agent-configurator-hub",
+      "branch": "feature/tpaclaims-operator-policy-claim-opening",
+      "source_branch": "main",
+      "role": "changed",
+      "changed": true,
+      "commit": "42493eb",
+      "deployed": false,
+      "deployment_environment": null
+    }
+  ],
+  "stage": "completed",
+  "status": "completed",
+  "next_action": "none",
+  "canonical_artifact": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/deploy_report.md",
+  "artifacts": {
+    "request": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/request.md",
+    "plan": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/plan.md",
+    "execution_brief": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/execution_brief.md",
+    "implementation": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/implementation_notes.md",
+    "review": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/review.md",
+    "fe_implementation": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/fe_implementation_notes.md",
+    "test": null,
+    "integration": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/merge_deploy_checkpoint.md",
+    "deploy": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/deploy_report.md",
+    "escalation": null,
+    "reopen": null,
+    "policyholder_filter_followup": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/policyholder_filter_namespace_followup.md",
+    "policy_order_by_followup": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/policy_order_by_followup.md",
+    "policy_service_distributor_followup": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/policy_service_distributor_followup.md",
+    "policy_pagination_followup": ".ai/workitems/2026-05-27_tpaclaims-application-policy-search-contract/artifacts/policy_pagination_followup.md"
+  },
+  "open_issues": [
+    "Configurator Hub lint remains blocked by known unrelated ESLint/esquery tooling crash in config.ts."
+  ],
+  "closed_issues": [
+    "Initial BE/FE impact analysis completed.",
+    "Workitem created separately from prior lifecycle hotfix work.",
+    "Legacy /v3/tpa-claims/policies removed — product not in production, FE update planned in sequence.",
+    "Implementation complete: 23 tests passing, loader regression clean.",
+    "Merge/deploy checkpoint completed against local feature branch content.",
+    "Backend focused tests passed: tests/views/test_applications_policies_views.py (25 passed).",
+    "Configurator Hub production build passed.",
+    "Policyholder name/email/phone filters are now namespace-scoped and no longer cross-match other properties.",
+    "Backend redeploy candidate updated to c97e197 after removing jsonb_typeof from text property filters.",
+    "Application policy search now supports single-field order_by with default -created.",
+    "Application policy search now returns service and distributor objects as additive response fields.",
+    "Application policy search now supports limit/offset pagination without total count.",
+    "Human smoke tests completed satisfactorily for the policy search flow.",
+    "Backend redeploy/smoke retest gap closed by human acceptance.",
+    "Remote merge/deploy confirmation gap closed by human smoke evidence.",
+    "administrative_closeout_completed"
+  ],
+  "human_overrides": [
+    {
+      "decision": "Do not treat this as a hotfix; create a specific workitem for the policy search endpoint contract correction.",
+      "source": "human request",
+      "approved_by": "human",
+      "approved_at": "2026-05-27"
+    },
+    {
+      "decision": "Use existing branch feature/tpaclaims-operator-policy-claim-opening for both changed repositories instead of creating a new branch, to allow ongoing smoke tests during implementation.",
+      "source": "human request",
+      "approved_by": "human",
+      "approved_at": "2026-05-27"
+    }
+  ],
+  "related_workitems": [
+    "2026-05-26_tpaclaims-clean-received-intake-lifecycle"
+  ],
+  "updated_at": "2026-05-27T13:06:08.659170+00:00",
+  "last_transition_summary": "human smoke tests satisfactory; application policy search contract completed"
+}
