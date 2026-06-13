@@ -68,6 +68,25 @@ Versionable configuration is separated from runtime artifacts:
 
 `init` is idempotent — it never overwrites files you've edited.
 
+## Configuring providers
+
+Bind roles to backends in `.ai/repo.yml`. A provider is declared once and
+referenced by name, so the same flow runs on different backends by editing
+config alone. Unbound roles run in dry-run.
+
+```yaml
+providers:
+  codex_cli:  { type: cli_one_shot, command: codex, args: ["exec"], prompt_via: arg }
+  claude_cli: { type: cli_one_shot, command: claude, args: ["-p"],   prompt_via: arg }
+roles:
+  planner:     { provider: codex_cli }
+  implementer: { provider: codex_cli }
+  reviewer:    { provider: claude_cli }
+```
+
+`conductor doctor` shows each binding and whether its command is on PATH.
+The conductor never logs in for you — the CLI must already be authenticated.
+
 ## State model
 
 Each workitem keeps a compact `state.yml` (stage, status, next action,
@@ -85,10 +104,14 @@ designed to grow toward the execution loop without restructuring.
     flow — selecting each role, building its context, capturing output as
     artifacts, advancing state, and writing a final report. `conductor execute`
     runs this loop end-to-end without calling a real model yet.
-  - *slice 2 (next):* real provider adapters (`cli_one_shot`, `cli_pty`, `api`,
-    `ollama`), a role→provider registry from `repo.yml`, the review/fix
-    back-edge, and stop conditions. The conductor does **not** own provider
-    authentication — CLIs are configured (and logged in) outside it.
+  - *slice 2a (done):* a real `cli_one_shot` provider (drives a headless CLI
+    via stdin/arg) and a role→provider registry read from `repo.yml`. Roles
+    with no binding fall back to dry-run; `execute --dry-run` forces dry-run.
+    The conductor does **not** own provider authentication — CLIs are
+    configured (and logged in) outside it.
+  - *slice 2b (next):* the review/fix back-edge and stop conditions
+    (max iterations, repeated blocker, scope/secret/prod guards). Future
+    provider types: `cli_pty`, `api`, `ollama`.
 - **MVP 3 — sessions/sandbox:** git worktrees, generated docker-compose,
   dynamic ports and smoke tests. The workitem (memory/state) is already
   separated from the session (runtime), so this is additive.

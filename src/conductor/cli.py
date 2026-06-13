@@ -15,10 +15,11 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from .config.loader import RepoConfigError, load_repo_config
 from .core.engine import Engine, GoalNotApproved, StepOutcome
 from .flows.loader import FlowNotFound, load_flow
 from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, require_ai_paths
-from .providers.dryrun import DryRunProvider
+from .providers.registry import ProviderConfigError, build_provider_for
 from .scaffold import scaffold_ai
 from .workitems.manager import (
     approve_goal,
@@ -200,12 +201,15 @@ def execute(
     workitem_id: str = typer.Argument(
         None, help="Workitem to execute (defaults to the active one)."
     ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", "-n", help="Force dry-run providers regardless of repo.yml."
+    ),
 ) -> None:
     """Run the workitem flow.
 
-    Provider execution is dry-run for now (MVP 2 slice 1): the loop, context
-    building, state transitions and artifacts are real; no model is called yet.
-    Real CLI/API providers arrive in the next slice.
+    Each role is executed by the provider bound to it in repo.yml; roles with no
+    binding fall back to dry-run, so an unconfigured repo still runs end-to-end.
+    Use --dry-run to force dry-run everywhere.
     """
     paths = _load_paths()
     wid = workitem_id or get_active_id(paths)
@@ -227,23 +231,34 @@ def execute(
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
 
-    provider = DryRunProvider()
-    engine = Engine(paths, flow, provider_for=lambda role: provider)
+    try:
+        config = load_repo_config(paths)
+    except RepoConfigError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
 
+    provider_for = build_provider_for(config, dry_run=dry_run)
+    engine = Engine(paths, flow, provider_for=provider_for)
+
+    mode = "[yellow]dry-run[/yellow]" if dry_run else "providers from repo.yml"
     console.print(
-        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan] "
-        f"· provider [yellow]{provider.name}[/yellow]\n"
+        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan] · {mode}\n"
     )
 
     def on_step(step: StepOutcome) -> None:
         mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
         rel = step.output_path.relative_to(wi.directory).as_posix()
-        console.print(f"  {mark} {step.role} [dim]({step.stage})[/dim] → {rel}")
+        console.print(
+            f"  {mark} {step.role} [dim]({step.stage} · {step.provider})[/dim] → {rel}"
+        )
 
     try:
         outcome = engine.run(wid, on_step=on_step)
     except GoalNotApproved as exc:
         err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    except ProviderConfigError as exc:
+        err_console.print(f"[red]Provider configuration error:[/red] {exc}")
         raise typer.Exit(code=1)
 
     if outcome.completed:
@@ -262,6 +277,7 @@ def doctor() -> None:
     """Check local prerequisites (``.ai/`` present, provider CLIs available)."""
     console.print(f"workitem-conductor [dim]v{__version__}[/dim]\n")
 
+    paths: AiPaths | None = None
     try:
         paths = require_ai_paths()
         console.print(f"[green]✓[/green] .ai/ found at {paths.root}")
@@ -275,9 +291,34 @@ def doctor() -> None:
             console.print(f"  [green]✓[/green] {name} [dim]({path})[/dim]")
         else:
             console.print(f"  [dim]· {name} not found[/dim]")
-    console.print(
-        "\n[dim]Provider execution arrives in MVP 2; these checks preview what it will use.[/dim]"
-    )
+
+    if paths is not None:
+        try:
+            config = load_repo_config(paths)
+        except RepoConfigError as exc:
+            console.print(f"\n[red]repo.yml is invalid:[/red] {exc}")
+            return
+        console.print("\nRole → provider bindings (from repo.yml):")
+        if not config.roles:
+            console.print("  [dim]· none configured — all roles run in dry-run[/dim]")
+        else:
+            for role, binding in config.roles.items():
+                provider_cfg = config.providers.get(binding.provider)
+                if provider_cfg is None:
+                    console.print(
+                        f"  [red]✗[/red] {role} → {binding.provider} [red](unknown provider)[/red]"
+                    )
+                    continue
+                avail = ""
+                if provider_cfg.type == "cli_one_shot" and provider_cfg.command:
+                    found = shutil.which(provider_cfg.command)
+                    avail = (
+                        f" [green](available)[/green]" if found else " [yellow](command not found)[/yellow]"
+                    )
+                console.print(
+                    f"  [green]✓[/green] {role} → {binding.provider} "
+                    f"[dim]({provider_cfg.type})[/dim]{avail}"
+                )
 
 
 if __name__ == "__main__":
