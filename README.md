@@ -133,34 +133,61 @@ designed to grow toward the execution loop without restructuring.
 
 ## Roadmap
 
-- **MVP 1 (done):** `init` + `define` + `approve` + `status` with an explicit
-  state model and artifact layout.
-- **AI-assisted goal definition (done):** `conductor refine` — a `refiner` role
-  that asks clarifying questions when needed (via a `QUESTIONS:`/`CONTRACT:`
-  gate) and writes the goal contract back to `goal.yml`, bounded by
+The conductor grows along two mostly-independent tracks: **execution** (making
+the loop richer and safer) and **visibility/UX** (seeing and steering work
+across projects).
+
+### Done
+
+- **MVP 1:** `init` + `define` + `approve` + `status` with an explicit state
+  model and artifact layout.
+- **MVP 2 — execution loop:** a `flows` loader, the `Provider` interface +
+  `DryRunProvider`, a context builder, and the `core` engine that drives the
+  flow (select role → build context → call provider → capture artifact → advance
+  state → final report). Includes the real `cli_one_shot` provider, the
+  role→provider registry read from `repo.yml` (unbound roles fall back to
+  dry-run, `execute --dry-run` forces it), and the review/fix back-edge: a
+  review-gated step parses `REVIEW: approved` / `changes_requested`; on changes
+  the loop returns to the implementer (stage `fixing`) up to `max_fix_iterations`,
+  then stops for the human.
+- **AI-assisted goal definition:** `conductor refine` — a `refiner` role that
+  asks clarifying questions when needed (via a `QUESTIONS:`/`CONTRACT:` gate) and
+  writes the goal contract back to `goal.yml`, bounded by
   `refine.max_question_rounds`.
-- **`api` provider (done):** run any role against an OpenAI-compatible HTTP
-  endpoint (stdlib-only), alongside the existing `cli_one_shot` providers.
-- **MVP 2 — execution loop:**
-  - *slice 1 (done):* `flows` loader, a `Provider` interface with a
-    `DryRunProvider`, a context builder, and a `core` engine that drives the
-    flow — selecting each role, building its context, capturing output as
-    artifacts, advancing state, and writing a final report. `conductor execute`
-    runs this loop end-to-end without calling a real model yet.
-  - *slice 2a (done):* a real `cli_one_shot` provider (drives a headless CLI
-    via stdin/arg) and a role→provider registry read from `repo.yml`. Roles
-    with no binding fall back to dry-run; `execute --dry-run` forces dry-run.
-    The conductor does **not** own provider authentication — CLIs are
-    configured (and logged in) outside it.
-  - *slice 2b (done):* the review/fix back-edge and stop conditions. A
-    review-gated step parses a `REVIEW: approved` / `REVIEW: changes_requested`
-    verdict from the reviewer; on changes the loop returns to the implementer
-    (stage `fixing`) up to `max_fix_iterations`, then stops for the human.
-- **MVP 3 — sessions/sandbox & richer providers:** `ollama` and `cli_pty`
-  provider types; git worktrees, generated docker-compose, dynamic ports and
-  smoke tests; semantic stop conditions (scope change, secrets/prod access,
-  reviewer/implementer deadlock). The workitem (memory/state) is already
-  separated from the session (runtime), so this is additive.
+- **`api` provider:** run any role against an OpenAI-compatible HTTP endpoint
+  (stdlib-only), alongside the `cli_one_shot` providers.
+
+### Track A — execution
+
+- **`ollama` provider** — native local models (reuses the `api` HTTP path).
+- **Context/token strategy** — summarise prior step outputs between steps instead
+  of replaying them verbatim (today's context grows with every fix iteration).
+- **Semantic stop conditions** — scope change, secrets/prod access,
+  reviewer/implementer deadlock (the deterministic caps already exist).
+- **Reopen/re-run** a completed workitem (`reopen` / `execute --from <step>`).
+- **`cli_pty` provider** *(on-demand)* — drive interactive-only CLIs via a
+  pseudo-terminal; the most brittle provider, built only when a needed CLI lacks
+  a headless mode.
+- **Sessions/sandbox** — git worktrees, generated docker-compose, dynamic ports,
+  smoke tests. The workitem (memory/state) is already separated from the session
+  (runtime), so this is additive.
+
+### Track B — visibility / UX
+
+- **B1 — workspace registry** (CLI, global `~/.config/conductor/`): register and
+  group project roots — the spine of "what to show."
+- **B2 — read-only dashboard** (`conductor dashboard`): an on-demand localhost
+  web view that scans registered workspaces and renders every workitem's state.
+  Pure read, low risk — good for sharing the picture with a team.
+- **B3 — interactive layer** *(later)*: a config cascade (global → workspace →
+  repo `.ai/` overrides) for per-step model defaults, plus triggering/approving
+  runs from the UI. The UI configures *env-var names*, never stored keys, and
+  stays localhost-only until auth is designed.
+
+### Smaller tweaks
+
+- `init` infers `name` from the directory instead of `TODO`.
+- Refiner prompt polish (emit only the marker block; tighter `scope.include`).
 
 ## Design principle
 
