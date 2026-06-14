@@ -179,7 +179,14 @@ across projects).
   writes the goal contract back to `goal.yml`, bounded by
   `refine.max_question_rounds`.
 - **`api` provider:** run any role against an OpenAI-compatible HTTP endpoint
-  (stdlib-only), alongside the `cli_one_shot` providers.
+  (stdlib-only), alongside the `cli_one_shot` providers. The refiner gate is
+  tolerant of models that follow it loosely (markers inferred; each round's raw
+  output captured under the workitem for diagnosis).
+- **Visibility B1–B2:** a global **workspace registry** (`conductor workspace
+  add/list/remove`, stored under `~/.config/conductor/`) and a **read-only
+  dashboard** (`conductor dashboard`) — an on-demand localhost web view that
+  scans the registered projects and renders every workitem's state. Pure read,
+  loopback-only.
 
 ### Track A — execution
 
@@ -198,15 +205,12 @@ across projects).
 
 ### Track B — visibility / UX
 
-- **B1 — workspace registry** (CLI, global `~/.config/conductor/`): register and
-  group project roots — the spine of "what to show."
-- **B2 — read-only dashboard** (`conductor dashboard`): an on-demand localhost
-  web view that scans registered workspaces and renders every workitem's state.
-  Pure read, low risk — good for sharing the picture with a team.
-- **B3 — interactive layer** *(later)*: a config cascade (global → workspace →
-  repo `.ai/` overrides) for per-step model defaults, plus triggering/approving
-  runs from the UI. The UI configures *env-var names*, never stored keys, and
-  stays localhost-only until auth is designed.
+B1 (workspace registry) and B2 (read-only dashboard) have shipped — see *Done*.
+
+- **B3 — interactive layer** *(next on this track)*: a config cascade (global →
+  workspace → repo `.ai/` overrides) for per-step model defaults, plus
+  triggering/approving runs from the UI. The UI configures *env-var names*, never
+  stored keys, and stays localhost-only until auth is designed.
 
 ### Smaller tweaks
 
