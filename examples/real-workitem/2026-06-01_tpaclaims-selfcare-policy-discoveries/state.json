@@ -1,0 +1,23 @@
+{
+  "work_item_id": "2026-06-01_tpaclaims-selfcare-policy-discoveries",
+  "parent_work_item_id": "2026-05-27_tpaclaims-capability-code-standardization",
+  "profile": "governed",
+  "repo": "habit-tpaclaims-pyservice-layer",
+  "branch": "feature/tpaclaims-legacy-selfcare-access",
+  "status": "completed",
+  "next_action": "none",
+  "canonical_artifact": ".ai/workitems/2026-06-01_tpaclaims-selfcare-policy-discoveries/artifacts/deploy_report.md",
+  "recommended_agent": "release-integration-validator",
+  "updated_at": "2026-06-02T09:49:47.331175+00:00",
+  "review_verdict": "pass_with_minors",
+  "review_fix_commit": "ee50249",
+  "title": "2026-06-01_tpaclaims-selfcare-policy-discoveries",
+  "stage": "completed",
+  "artifacts": {},
+  "open_issues": [],
+  "closed_issues": [
+    "administrative_closeout_completed"
+  ],
+  "human_overrides": [],
+  "last_transition_summary": "deployed and smoke tested successfully on 2026-06-02"
+}

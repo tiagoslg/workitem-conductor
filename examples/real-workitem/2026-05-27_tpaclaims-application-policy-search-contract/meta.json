@@ -1,0 +1,48 @@
+{
+  "work_item_id": "2026-05-27_tpaclaims-application-policy-search-contract",
+  "title": "Application-scoped TPA Claims policy search contract",
+  "profile": "governed",
+  "role": "backend-implementer",
+  "mode": "full",
+  "created_at": "2026-05-27T10:21:31+01:00",
+  "source": "human request on 2026-05-27 after smoke testing policy search",
+  "repositories": [
+    "habit-tpaclaims-pyservice-layer",
+    "habit-agent-configurator-hub"
+  ],
+  "related_workitems": [
+    "2026-05-26_tpaclaims-clean-received-intake-lifecycle"
+  ],
+  "repository_branches": [
+    {
+      "repo": "habit-tpaclaims-pyservice-layer",
+      "will_change": true,
+      "role": "primary_backend_contract",
+      "suggested_branch": "feature/tpaclaims-operator-policy-claim-opening",
+      "source_branch": "main"
+    },
+    {
+      "repo": "habit-agent-configurator-hub",
+      "will_change": true,
+      "role": "frontend_consumer",
+      "suggested_branch": "feature/tpaclaims-operator-policy-claim-opening",
+      "source_branch": "main"
+    },
+    {
+      "repo": "habit-care-pyservice-layer",
+      "will_change": false,
+      "role": "out_of_scope",
+      "suggested_branch": null,
+      "source_branch": null
+    },
+    {
+      "repo": "habit-care-pyservice-layer-fe",
+      "will_change": false,
+      "role": "out_of_scope",
+      "suggested_branch": null,
+      "source_branch": null
+    }
+  ],
+  "updated_at": "2026-05-27T10:27:54+01:00",
+  "branch_override_reason": "Use existing operator policy claim opening branch so smoke tests can continue while this workitem is implemented."
+}
