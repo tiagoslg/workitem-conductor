@@ -88,6 +88,55 @@ def test_parse_marker_case_insensitive_and_indented():
     assert resp.contract["acceptance_criteria"] == ["done"]
 
 
+def test_parse_marker_with_markdown_decoration():
+    # smaller models wrap the marker in bold / headings
+    bold = "**CONTRACT:**\n```yaml\nscope: {include: [a]}\n```\n"
+    assert parse_refine_response(bold).kind == "contract"
+    heading = "## QUESTIONS\n1. which module?\n"
+    resp = parse_refine_response(heading)
+    assert resp.kind == "questions"
+    assert resp.questions == ["which module?"]
+
+
+def test_infer_contract_from_bare_yaml_block():
+    # no CONTRACT: marker, but a yaml block with contract keys
+    text = (
+        "Here is the contract for the change:\n"
+        "```yaml\n"
+        "scope:\n  include: [src/http.py]\n"
+        "acceptance_criteria: [retries on 5xx]\n"
+        "```\n"
+    )
+    resp = parse_refine_response(text)
+    assert resp.kind == "contract"
+    assert resp.contract["scope"]["include"] == ["src/http.py"]
+
+
+def test_infer_questions_from_bare_numbered_list():
+    # no QUESTIONS: marker (the real Qwen failure mode)
+    text = (
+        "I need a few more details before writing the contract:\n"
+        "1. What config file format should be used?\n"
+        "2. Which methods should retry?\n"
+    )
+    resp = parse_refine_response(text)
+    assert resp.kind == "questions"
+    assert resp.questions == [
+        "What config file format should be used?",
+        "Which methods should retry?",
+    ]
+
+
+def test_prose_without_list_is_not_mistaken_for_questions():
+    # a question mark in prose must not trigger the questions path
+    assert parse_refine_response("Is this clear enough? I think so.").kind == "unknown"
+
+
+def test_unrelated_code_block_is_not_a_contract():
+    text = "```python\nprint('hello')\n```\n"
+    assert parse_refine_response(text).kind == "unknown"
+
+
 # --- driver -----------------------------------------------------------------
 
 
@@ -193,3 +242,31 @@ def test_refine_stops_on_provider_failure(paths: AiPaths):
     assert outcome.updated is False
     assert "provider failed" in outcome.stopped_reason
     assert "boom" in outcome.stopped_reason
+
+
+def test_refine_persists_raw_round_outputs(paths: AiPaths):
+    # every round's raw output is saved so a stop is diagnosable afterwards
+    wi = create_workitem(paths, "raw capture")
+    provider = ScriptedRefiner([QUESTIONS_RESPONSE, CONTRACT_RESPONSE])
+    refiner = Refiner(paths, provider_for=lambda role: provider)
+    refiner.run(wi.workitem_id, ask=lambda q: ["a"])
+
+    raw_dir = wi.directory / "refine"
+    assert (raw_dir / "01-raw.md").is_file()
+    round1 = (raw_dir / "01-raw.md").read_text()
+    assert "parsed: questions" in round1
+    assert "QUESTIONS:" in round1  # the actual model output is preserved
+    assert "parsed: contract" in (raw_dir / "02-raw.md").read_text()
+
+
+def test_refine_recovers_from_markerless_questions(paths: AiPaths):
+    # the real Qwen failure: a question list with no QUESTIONS: marker, then a contract
+    markerless = "I need more detail:\n1. Which config format?\n2. Which methods retry?\n"
+    wi = create_workitem(paths, "markerless")
+    provider = ScriptedRefiner([markerless, CONTRACT_RESPONSE])
+    asked: list[list[str]] = []
+    refiner = Refiner(paths, provider_for=lambda role: provider)
+    outcome = refiner.run(wi.workitem_id, ask=lambda q: asked.append(q) or ["x", "y"])
+
+    assert outcome.updated is True
+    assert asked == [["Which config format?", "Which methods retry?"]]
