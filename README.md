@@ -41,11 +41,35 @@ Run from inside the repository you want to work on:
 cd ~/projects/my-service
 conductor init                 # scaffold .ai/ (config, flow, role prompts)
 conductor define "fix the policy discovery bug"
+conductor refine               # optional: AI proposes scope/criteria, asking if needed
 #   edit .ai/workitems/<id>/goal.yml — scope, acceptance criteria, stop conditions
 conductor approve              # mark the goal approved & ready to execute
 conductor status               # show the active workitem
 conductor execute              # run the flow end-to-end (dry-run providers for now)
 conductor doctor               # check prerequisites and provider CLIs
+```
+
+## Refining the goal with AI
+
+`define` is mechanical — it just records the goal. `conductor refine` is the
+optional, AI-assisted step that turns a one-line goal into a real contract. The
+`refiner` role reads the goal, explores the repo, and **decides whether it needs
+to ask you anything** before proposing `scope`, `acceptance_criteria`,
+`constraints`, `validation` and `stop_conditions`.
+
+Because providers are stateless one-shot CLIs, the dialogue runs as a re-prompt
+loop with a deterministic gate (the same idea as the review gate): each round the
+refiner emits either `QUESTIONS:` (the conductor asks you in the terminal and
+loops) or `CONTRACT:` (a YAML block written back to `goal.yml`). It never
+approves — you still review and run `conductor approve`. The number of question
+rounds is bounded by `refine.max_question_rounds` in `repo.yml` (default 5).
+
+`refine` uses the provider bound to the `refiner` role; with no binding (or
+`--dry-run`) it makes no proposal. Bind it like any other role:
+
+```yaml
+roles:
+  refiner: { provider: codex_cli }
 ```
 
 ## What `init` writes
@@ -98,6 +122,10 @@ designed to grow toward the execution loop without restructuring.
 
 - **MVP 1 (done):** `init` + `define` + `approve` + `status` with an explicit
   state model and artifact layout.
+- **AI-assisted goal definition (done):** `conductor refine` — a `refiner` role
+  that asks clarifying questions when needed (via a `QUESTIONS:`/`CONTRACT:`
+  gate) and writes the goal contract back to `goal.yml`, bounded by
+  `refine.max_question_rounds`.
 - **MVP 2 — execution loop:**
   - *slice 1 (done):* `flows` loader, a `Provider` interface with a
     `DryRunProvider`, a context builder, and a `core` engine that drives the

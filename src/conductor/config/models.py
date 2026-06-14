@@ -36,8 +36,15 @@ class RoleBinding(BaseModel):
     provider: str
 
 
+class RefineConfig(BaseModel):
+    """Settings for the AI-assisted goal-definition loop (``conductor refine``)."""
+
+    max_question_rounds: int = 5
+
+
 class RepoConfig(BaseModel):
     name: str = "TODO"
     default_flow: str = "simple-change"
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     roles: dict[str, RoleBinding] = Field(default_factory=dict)
+    refine: RefineConfig = Field(default_factory=RefineConfig)
