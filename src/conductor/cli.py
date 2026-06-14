@@ -30,12 +30,27 @@ from .workitems.manager import (
     list_workitems,
     load_workitem,
 )
+from .workspaces import (
+    DEFAULT_WORKSPACE,
+    WorkspaceRegistryError,
+    add_project,
+    list_projects,
+    load_registry,
+    registry_path,
+    remove_project,
+    save_registry,
+)
 
 app = typer.Typer(
     help="Local conductor for AI-assisted development workflows.",
     no_args_is_help=True,
     add_completion=False,
 )
+workspace_app = typer.Typer(
+    help="Manage the global workspace registry (project roots to watch).",
+    no_args_is_help=True,
+)
+app.add_typer(workspace_app, name="workspace")
 console = Console()
 err_console = Console(stderr=True)
 
@@ -414,6 +429,119 @@ def doctor() -> None:
                     f"  [green]✓[/green] {role} → {binding.provider} "
                     f"[dim]({provider_cfg.type})[/dim]{avail}"
                 )
+
+
+def _load_registry():
+    try:
+        return load_registry()
+    except WorkspaceRegistryError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+
+@workspace_app.command("add")
+def workspace_add(
+    path: str = typer.Argument(".", help="Project root to register (default: cwd)."),
+    name: str = typer.Option(
+        DEFAULT_WORKSPACE, "--name", "-w", help="Workspace to add it to."
+    ),
+) -> None:
+    """Register a project root in the global workspace registry."""
+    registry = _load_registry()
+    resolved, added, has_ai = add_project(registry, path, workspace=name)
+    save_registry(registry)
+    if added:
+        console.print(f"[green]Added[/green] {resolved} [dim]→ workspace '{name}'[/dim]")
+    else:
+        console.print(f"[dim]{resolved} already in workspace '{name}'[/dim]")
+    if not has_ai:
+        console.print(
+            "  [yellow]note:[/yellow] no .ai/ here yet — run "
+            "[bold]conductor init[/bold] in that repo."
+        )
+
+
+@workspace_app.command("remove")
+def workspace_remove(
+    path: str = typer.Argument(..., help="Project root to remove."),
+    name: str = typer.Option(
+        None, "--name", "-w", help="Workspace to remove from (default: all)."
+    ),
+) -> None:
+    """Remove a project root from the registry."""
+    registry = _load_registry()
+    if remove_project(registry, path, workspace=name):
+        save_registry(registry)
+        console.print(f"[green]Removed[/green] {Path(path).expanduser().resolve()}")
+    else:
+        console.print("[yellow]Not found in the registry.[/yellow]")
+
+
+@workspace_app.command("list")
+def workspace_list() -> None:
+    """List registered workspaces and their projects."""
+    registry = _load_registry()
+    any_project = any(ws.paths for ws in registry.workspaces.values())
+    if not any_project:
+        console.print(
+            f"No projects registered. Run [bold]conductor workspace add .[/bold]\n"
+            f"[dim]registry: {registry_path()}[/dim]"
+        )
+        return
+
+    for ws_name, ws in registry.workspaces.items():
+        if not ws.paths:
+            continue
+        table = Table(title=f"workspace: {ws_name}")
+        table.add_column("project", style="bold")
+        table.add_column("path", style="dim")
+        table.add_column("workitems", justify="right")
+        table.add_column("needs attention", justify="right")
+        for path in ws.paths:
+            root = Path(path)
+            total, attention, marker = 0, 0, ""
+            ai_root = root / AI_DIRNAME
+            if (ai_root / "workitems").is_dir():
+                paths = AiPaths(root=ai_root)
+                ids = list_workitems(paths)
+                total = len(ids)
+                for wid in ids:
+                    st = load_workitem(paths, wid).state.status
+                    if st in ("needs_human", "blocked"):
+                        attention += 1
+            else:
+                marker = " [yellow](no .ai/)[/yellow]"
+            table.add_row(
+                root.name + marker,
+                str(root),
+                str(total),
+                f"[red]{attention}[/red]" if attention else "0",
+            )
+        console.print(table)
+
+
+@app.command()
+def dashboard(
+    name: str = typer.Option(
+        None, "--name", "-w", help="Limit to one workspace (default: all)."
+    ),
+    port: int = typer.Option(8787, "--port", "-p", help="Port to bind on localhost."),
+    no_open: bool = typer.Option(
+        False, "--no-open", help="Do not open a browser window."
+    ),
+) -> None:
+    """Serve a read-only web dashboard of workitems across registered projects."""
+    from .dashboard.server import serve
+
+    registry = _load_registry()
+    if not list_projects(registry, name):
+        scope = f"workspace '{name}'" if name else "the registry"
+        err_console.print(
+            f"[red]No projects in {scope}.[/red]  Run "
+            "`conductor workspace add <path>` first."
+        )
+        raise typer.Exit(code=1)
+    serve(registry, workspace=name, port=port, open_browser=not no_open)
 
 
 if __name__ == "__main__":

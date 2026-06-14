@@ -124,6 +124,30 @@ Provider types:
 logs in for you — CLIs must already be authenticated and API keys must be
 exported in your environment.
 
+## Watching work across projects
+
+Each repo keeps its own `.ai/`, so by default you only see a workitem from inside
+its repo. To see work across several projects at once, register their roots in a
+global **workspace registry** and open the read-only dashboard:
+
+```bash
+conductor workspace add ~/projects/service-a          # default workspace
+conductor workspace add ~/projects/service-b -w work  # a named workspace
+conductor workspace list                              # roots + workitem counts
+conductor dashboard                                   # localhost web view
+```
+
+`conductor dashboard` starts a small server on `127.0.0.1` (default port 8787;
+`--no-open` to skip launching a browser, `-w NAME` to scope to one workspace). It
+scans the registered projects and renders every workitem's state, auto-refreshing
+every few seconds.
+
+It is **read-only** — it never runs agents or writes anything, only reads the
+`state.yml` files the engine produces — and binds to loopback only. The registry
+lives under `~/.config/conductor/` and stores paths only (no project state, no
+secrets). It records *where* your projects are, nothing about how to reach any
+model.
+
 ## State model
 
 Each workitem keeps a compact `state.yml` (stage, status, next action,
