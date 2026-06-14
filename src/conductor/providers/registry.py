@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..config.models import ProviderConfig, RepoConfig
+from .api import ApiProvider
 from .base import Provider
 from .cli_one_shot import CliOneShotProvider
 from .dryrun import DryRunProvider
@@ -38,8 +39,25 @@ def build_provider(name: str, config: ProviderConfig) -> Provider:
             prompt_via=config.prompt_via,
             timeout=config.timeout,
         )
+    if config.type == "api":
+        missing = [
+            field
+            for field in ("base_url", "model", "api_key_env")
+            if not getattr(config, field)
+        ]
+        if missing:
+            raise ProviderConfigError(
+                f"provider '{name}' is type api but missing: {', '.join(missing)}"
+            )
+        return ApiProvider(
+            name=name,
+            model=config.model,
+            base_url=config.base_url,
+            api_key_env=config.api_key_env,
+            timeout=config.timeout,
+        )
     raise ProviderConfigError(
-        f"provider '{name}' has unsupported type '{config.type}' (api/ollama arrive later)"
+        f"provider '{name}' has unsupported type '{config.type}' (ollama arrives later)"
     )
 
 

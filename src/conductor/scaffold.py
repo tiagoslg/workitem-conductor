@@ -30,6 +30,11 @@ default_flow: simple-change
 #   claude_cli:
 #     type: cli_one_shot
 #     command: claude
+#   qwen_api:
+#     type: api                      # OpenAI-compatible HTTP endpoint
+#     base_url: https://api.example.com/v1
+#     model: qwen2.5-coder
+#     api_key_env: QWEN_API_KEY      # key is read from this env var, never stored
 #
 # roles:
 #   refiner:     { provider: codex_cli }   # used by `conductor refine`

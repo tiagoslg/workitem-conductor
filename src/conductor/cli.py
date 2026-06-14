@@ -7,6 +7,7 @@ the direction is visible without pretending to do work.
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -399,6 +400,15 @@ def doctor() -> None:
                     found = shutil.which(provider_cfg.command)
                     avail = (
                         f" [green](available)[/green]" if found else " [yellow](command not found)[/yellow]"
+                    )
+                elif provider_cfg.type == "api":
+                    key_set = provider_cfg.api_key_env and os.environ.get(
+                        provider_cfg.api_key_env
+                    )
+                    avail = (
+                        " [green](API key set)[/green]"
+                        if key_set
+                        else " [yellow](API key env not set)[/yellow]"
                     )
                 console.print(
                     f"  [green]✓[/green] {role} → {binding.provider} "

@@ -102,14 +102,27 @@ config alone. Unbound roles run in dry-run.
 providers:
   codex_cli:  { type: cli_one_shot, command: codex, args: ["exec"], prompt_via: arg }
   claude_cli: { type: cli_one_shot, command: claude, args: ["-p"],   prompt_via: arg }
+  qwen_api:   { type: api, base_url: https://api.example.com/v1, model: qwen2.5-coder, api_key_env: QWEN_API_KEY }
 roles:
   planner:     { provider: codex_cli }
   implementer: { provider: codex_cli }
   reviewer:    { provider: claude_cli }
+  refiner:     { provider: qwen_api }
 ```
 
-`conductor doctor` shows each binding and whether its command is on PATH.
-The conductor never logs in for you — the CLI must already be authenticated.
+Provider types:
+
+- **`cli_one_shot`** — drive a headless coding-agent CLI (Codex, Claude) via
+  stdin or an argument.
+- **`api`** — call an OpenAI-compatible `chat/completions` endpoint (OpenAI,
+  Qwen, vLLM, LM Studio, a gateway). Requires `base_url`, `model` and
+  `api_key_env`; the key is read from that environment variable and **never
+  stored**. Uses only the standard library (no extra dependency).
+
+`conductor doctor` shows each binding and whether its command is on PATH (for
+`cli_one_shot`) or its API-key env var is set (for `api`). The conductor never
+logs in for you — CLIs must already be authenticated and API keys must be
+exported in your environment.
 
 ## State model
 
@@ -126,6 +139,8 @@ designed to grow toward the execution loop without restructuring.
   that asks clarifying questions when needed (via a `QUESTIONS:`/`CONTRACT:`
   gate) and writes the goal contract back to `goal.yml`, bounded by
   `refine.max_question_rounds`.
+- **`api` provider (done):** run any role against an OpenAI-compatible HTTP
+  endpoint (stdlib-only), alongside the existing `cli_one_shot` providers.
 - **MVP 2 — execution loop:**
   - *slice 1 (done):* `flows` loader, a `Provider` interface with a
     `DryRunProvider`, a context builder, and a `core` engine that drives the
@@ -141,11 +156,11 @@ designed to grow toward the execution loop without restructuring.
     review-gated step parses a `REVIEW: approved` / `REVIEW: changes_requested`
     verdict from the reviewer; on changes the loop returns to the implementer
     (stage `fixing`) up to `max_fix_iterations`, then stops for the human.
-- **MVP 3 — sessions/sandbox & richer providers:** `cli_pty`, `api` and
-  `ollama` provider types; git worktrees, generated docker-compose, dynamic
-  ports and smoke tests; semantic stop conditions (scope change, secrets/prod
-  access, reviewer/implementer deadlock). The workitem (memory/state) is
-  already separated from the session (runtime), so this is additive.
+- **MVP 3 — sessions/sandbox & richer providers:** `ollama` and `cli_pty`
+  provider types; git worktrees, generated docker-compose, dynamic ports and
+  smoke tests; semantic stop conditions (scope change, secrets/prod access,
+  reviewer/implementer deadlock). The workitem (memory/state) is already
+  separated from the session (runtime), so this is additive.
 
 ## Design principle
 

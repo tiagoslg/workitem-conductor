@@ -1,11 +1,16 @@
+import io
+import json
 import sys
 from pathlib import Path
+from urllib import error
 
 import pytest
 
 from conductor.config.loader import RepoConfigError, load_repo_config
 from conductor.config.models import ProviderConfig, RepoConfig, RoleBinding
 from conductor.paths import AiPaths
+from conductor.providers import api as api_module
+from conductor.providers.api import ApiProvider
 from conductor.providers.base import ProviderRequest
 from conductor.providers.cli_one_shot import CliOneShotProvider
 from conductor.providers.dryrun import DryRunProvider
@@ -145,3 +150,133 @@ def test_cli_one_shot_missing_command(tmp_path: Path):
     )
     assert not result.ok
     assert "not found" in result.error
+
+
+# --- api provider (stubbed transport, no network) -----------------------
+
+class _FakeResp:
+    """Minimal stand-in for the urlopen context manager."""
+
+    def __init__(self, body: str) -> None:
+        self._body = body.encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self) -> "_FakeResp":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+def _api_provider() -> ApiProvider:
+    return ApiProvider(
+        name="qwen", model="qwen2.5", base_url="https://host/v1", api_key_env="TEST_API_KEY"
+    )
+
+
+def _request(prompt: str = "do the thing") -> ProviderRequest:
+    return ProviderRequest(role="refiner", prompt=prompt, workitem_id="wi", cwd=Path("."))
+
+
+def test_build_provider_api():
+    provider = build_provider(
+        "qwen",
+        ProviderConfig(type="api", base_url="https://host/v1", model="m", api_key_env="K"),
+    )
+    assert isinstance(provider, ApiProvider)
+    assert provider.model == "m"
+    assert provider.base_url == "https://host/v1"
+
+
+def test_build_provider_api_missing_fields():
+    with pytest.raises(ProviderConfigError) as exc:
+        build_provider("qwen", ProviderConfig(type="api"))
+    message = str(exc.value)
+    assert "base_url" in message and "model" in message and "api_key_env" in message
+
+
+def test_api_available_reflects_env(monkeypatch):
+    provider = _api_provider()
+    monkeypatch.delenv("TEST_API_KEY", raising=False)
+    assert provider.available() is False
+    monkeypatch.setenv("TEST_API_KEY", "secret")
+    assert provider.available() is True
+
+
+def test_api_run_success_builds_request(monkeypatch):
+    monkeypatch.setenv("TEST_API_KEY", "secret")
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["auth"] = req.get_header("Authorization")
+        captured["body"] = json.loads(req.data)
+        captured["timeout"] = timeout
+        return _FakeResp(json.dumps({"choices": [{"message": {"content": "hi there"}}]}))
+
+    monkeypatch.setattr(api_module.request, "urlopen", fake_urlopen)
+
+    result = _api_provider().run(_request("do the thing"))
+
+    assert result.ok
+    assert result.output == "hi there"
+    assert result.provider == "qwen"
+    assert captured["url"] == "https://host/v1/chat/completions"
+    assert captured["auth"] == "Bearer secret"
+    assert captured["body"]["model"] == "qwen2.5"
+    assert captured["body"]["messages"] == [{"role": "user", "content": "do the thing"}]
+
+
+def test_api_run_missing_key_does_not_call_network(monkeypatch):
+    monkeypatch.delenv("TEST_API_KEY", raising=False)
+    called = {"hit": False}
+
+    def fake_urlopen(req, timeout=None):  # pragma: no cover - must not run
+        called["hit"] = True
+        return _FakeResp("{}")
+
+    monkeypatch.setattr(api_module.request, "urlopen", fake_urlopen)
+    result = _api_provider().run(_request())
+
+    assert not result.ok
+    assert "not set" in result.error
+    assert called["hit"] is False
+
+
+def test_api_run_http_error(monkeypatch):
+    monkeypatch.setenv("TEST_API_KEY", "secret")
+
+    def fake_urlopen(req, timeout=None):
+        raise error.HTTPError(
+            req.full_url, 401, "Unauthorized", None, io.BytesIO(b'{"error":"bad key"}')
+        )
+
+    monkeypatch.setattr(api_module.request, "urlopen", fake_urlopen)
+    result = _api_provider().run(_request())
+
+    assert not result.ok
+    assert "401" in result.error
+
+
+def test_api_run_unparseable_response(monkeypatch):
+    monkeypatch.setenv("TEST_API_KEY", "secret")
+    monkeypatch.setattr(
+        api_module.request, "urlopen", lambda req, timeout=None: _FakeResp("not json at all")
+    )
+    result = _api_provider().run(_request())
+    assert not result.ok
+    assert "unparseable" in result.error
+
+
+def test_api_run_missing_choices(monkeypatch):
+    monkeypatch.setenv("TEST_API_KEY", "secret")
+    monkeypatch.setattr(
+        api_module.request,
+        "urlopen",
+        lambda req, timeout=None: _FakeResp(json.dumps({"unexpected": True})),
+    )
+    result = _api_provider().run(_request())
+    assert not result.ok
+    assert "unparseable" in result.error
