@@ -9,6 +9,7 @@ EXPECTED = {
     "roles/planner.md",
     "roles/implementer.md",
     "roles/reviewer.md",
+    "roles/refiner.md",
     ".gitignore",
 }
 

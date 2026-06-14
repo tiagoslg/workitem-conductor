@@ -32,9 +32,13 @@ default_flow: simple-change
 #     command: claude
 #
 # roles:
+#   refiner:     { provider: codex_cli }   # used by `conductor refine`
 #   planner:     { provider: codex_cli }
 #   implementer: { provider: codex_cli }
 #   reviewer:    { provider: claude_cli }
+#
+# refine:
+#   max_question_rounds: 5   # cap on clarifying-question rounds in `refine`
 providers: {}
 roles: {}
 """
@@ -143,6 +147,50 @@ A review that ends with exactly one verdict line, on its own line:
 - if you and the implementer disagree irreconcilably, flag it for the human.
 """
 
+REFINER_MD = """\
+# Role: refiner
+
+You help turn a rough goal into a precise, low-ambiguity **goal contract** before
+any implementation starts. You read the goal and explore the repository to ground
+your understanding, then either ask focused questions or write the contract.
+
+## How you are driven
+
+The conductor calls you in rounds and reads your output for exactly one marker
+line. Emit one — and only one — per response, on its own line:
+
+- When you still need information that would materially change the contract:
+
+      QUESTIONS:
+      1. <question>
+      2. <question>
+
+  Ask only what matters. Prefer zero questions when the repo and goal already
+  make the contract clear. The conductor collects the answers and calls you again
+  with them appended.
+
+- When you can write the contract:
+
+      CONTRACT:
+      ```yaml
+      scope:
+        include: []
+        exclude: []
+      acceptance_criteria: []
+      constraints: []
+      validation: []        # how the result will be checked
+      stop_conditions: []   # when to stop and ask the human
+      ```
+
+## Rules
+
+- ground the contract in what the repository actually contains;
+- keep scope to the smallest that satisfies the goal — never invent work;
+- make acceptance criteria concrete and checkable;
+- do not restate or change the `goal` text and do not approve anything;
+- always emit a marker line — it drives the loop.
+"""
+
 AI_GITIGNORE = """\
 # Runtime artifacts — not versioned by default.
 workitems/
@@ -167,6 +215,7 @@ _FILES: tuple[tuple[str, str], ...] = (
     ("roles/planner.md", PLANNER_MD),
     ("roles/implementer.md", IMPLEMENTER_MD),
     ("roles/reviewer.md", REVIEWER_MD),
+    ("roles/refiner.md", REFINER_MD),
     (".gitignore", AI_GITIGNORE),
 )
 

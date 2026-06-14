@@ -17,6 +17,7 @@ from rich.table import Table
 from . import __version__
 from .config.loader import RepoConfigError, load_repo_config
 from .core.engine import Engine, GoalNotApproved, StepOutcome
+from .core.refine import Refiner
 from .flows.loader import FlowNotFound, load_flow
 from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, require_ai_paths
 from .providers.registry import ProviderConfigError, build_provider_for
@@ -94,8 +95,8 @@ def define(
     console.print(f"  goal:  {rel}")
     console.print(f"  state: stage=[cyan]defined[/cyan] status=[yellow]draft[/yellow]")
     console.print(
-        "\nNext: edit the goal contract (scope, acceptance criteria, stop conditions),\n"
-        f"refine {rel}, then run [bold]conductor approve[/bold] and [bold]conductor execute[/bold]."
+        "\nNext: run [bold]conductor refine[/bold] for AI-assisted scope/criteria,\n"
+        f"or edit {rel} by hand — then [bold]conductor approve[/bold] and [bold]conductor execute[/bold]."
     )
 
 
@@ -133,6 +134,84 @@ def approve(
         f"next=[bold]{updated.state.next_action}[/bold]"
     )
     console.print("\nNext: [bold]conductor execute[/bold]")
+
+
+@app.command()
+def refine(
+    workitem_id: str = typer.Argument(
+        None, help="Workitem to refine (defaults to the active one)."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", "-n", help="Force the dry-run provider (no real model)."
+    ),
+) -> None:
+    """Improve the goal contract with an AI refiner that asks before it writes.
+
+    The refiner (role ``refiner``) reads the goal, explores the repo, and either
+    asks clarifying questions or writes scope/acceptance criteria/constraints/
+    validation/stop conditions back to goal.yml. It never approves — run
+    `conductor approve` after reviewing the result.
+    """
+    paths = _load_paths()
+    wid = workitem_id or get_active_id(paths)
+    if wid is None:
+        err_console.print(
+            "[red]No workitem to refine.[/red]  Run `conductor define \"<goal>\"` first."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        load_workitem(paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    try:
+        config = load_repo_config(paths)
+    except RepoConfigError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    provider_for = build_provider_for(config, dry_run=dry_run)
+    refiner = Refiner(paths, provider_for, max_rounds=config.refine.max_question_rounds)
+
+    mode = "[yellow]dry-run[/yellow]" if dry_run else "refiner from repo.yml"
+    console.print(f"Refining [bold]{wid}[/bold] · {mode}\n")
+
+    def ask(questions: list[str]) -> list[str]:
+        console.print("[bold]The refiner needs some clarification:[/bold]")
+        answers: list[str] = []
+        for i, question in enumerate(questions, start=1):
+            answers.append(typer.prompt(f"  {i}. {question}\n  >"))
+        console.print("")
+        return answers
+
+    def on_round(round_no: int, kind: str) -> None:
+        if kind == "questions":
+            console.print(f"[dim]round {round_no}: refiner is asking questions…[/dim]")
+        elif kind == "contract":
+            console.print(f"[dim]round {round_no}: refiner proposed a contract.[/dim]")
+
+    try:
+        outcome = refiner.run(wid, ask=ask, on_round=on_round)
+    except ProviderConfigError as exc:
+        err_console.print(f"[red]Provider configuration error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if outcome.updated:
+        goal_rel = f".ai/workitems/{wid}/goal.yml"
+        console.print(
+            f"\n[green]Goal contract updated.[/green]  Review/edit [bold]{goal_rel}[/bold], "
+            "then run [bold]conductor approve[/bold]."
+        )
+    else:
+        console.print(f"\n[yellow]No changes written:[/yellow] {outcome.stopped_reason}")
+        if dry_run:
+            console.print(
+                "[dim]The dry-run provider makes no proposal — bind a real "
+                "provider to the `refiner` role in repo.yml.[/dim]"
+            )
+        raise typer.Exit(code=1)
 
 
 @app.command()
