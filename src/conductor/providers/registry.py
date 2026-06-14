@@ -15,6 +15,7 @@ from .api import ApiProvider
 from .base import Provider
 from .cli_one_shot import CliOneShotProvider
 from .dryrun import DryRunProvider
+from .ollama import OllamaProvider
 
 ProviderFor = Callable[[str], Provider]
 
@@ -56,8 +57,19 @@ def build_provider(name: str, config: ProviderConfig) -> Provider:
             api_key_env=config.api_key_env,
             timeout=config.timeout,
         )
+    if config.type == "ollama":
+        if not config.model:
+            raise ProviderConfigError(
+                f"provider '{name}' is type ollama but has no 'model'"
+            )
+        return OllamaProvider(
+            name=name,
+            model=config.model,
+            base_url=config.base_url or OllamaProvider.DEFAULT_BASE_URL,
+            timeout=config.timeout,
+        )
     raise ProviderConfigError(
-        f"provider '{name}' has unsupported type '{config.type}' (ollama arrives later)"
+        f"provider '{name}' has unsupported type '{config.type}'"
     )
 
 

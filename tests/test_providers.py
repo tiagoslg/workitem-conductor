@@ -10,7 +10,9 @@ from conductor.config.loader import RepoConfigError, load_repo_config
 from conductor.config.models import ProviderConfig, RepoConfig, RoleBinding
 from conductor.paths import AiPaths
 from conductor.providers import api as api_module
+from conductor.providers import ollama as ollama_module
 from conductor.providers.api import ApiProvider
+from conductor.providers.ollama import OllamaProvider
 from conductor.providers.base import ProviderRequest
 from conductor.providers.cli_one_shot import CliOneShotProvider
 from conductor.providers.dryrun import DryRunProvider
@@ -280,3 +282,93 @@ def test_api_run_missing_choices(monkeypatch):
     result = _api_provider().run(_request())
     assert not result.ok
     assert "unparseable" in result.error
+
+
+# --- ollama provider (stubbed transport, no network) --------------------
+
+def _ollama() -> OllamaProvider:
+    return OllamaProvider(name="local", model="qwen2.5-coder")
+
+
+def test_build_provider_ollama_defaults_base_url():
+    provider = build_provider("local", ProviderConfig(type="ollama", model="m"))
+    assert isinstance(provider, OllamaProvider)
+    assert provider.model == "m"
+    assert provider.base_url == OllamaProvider.DEFAULT_BASE_URL
+
+
+def test_build_provider_ollama_requires_model():
+    with pytest.raises(ProviderConfigError):
+        build_provider("local", ProviderConfig(type="ollama"))
+
+
+def test_ollama_run_success_builds_request(monkeypatch):
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["body"] = json.loads(req.data)
+        return _FakeResp(json.dumps({"message": {"content": "hi from llama"}}))
+
+    monkeypatch.setattr(ollama_module.request, "urlopen", fake_urlopen)
+    result = _ollama().run(_request("do it"))
+
+    assert result.ok
+    assert result.output == "hi from llama"
+    assert captured["url"] == "http://localhost:11434/api/chat"
+    assert captured["body"]["model"] == "qwen2.5-coder"
+    assert captured["body"]["stream"] is False
+    assert captured["body"]["messages"] == [{"role": "user", "content": "do it"}]
+
+
+def test_ollama_run_http_error(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        raise error.HTTPError(req.full_url, 500, "boom", None, io.BytesIO(b"server error"))
+
+    monkeypatch.setattr(ollama_module.request, "urlopen", fake_urlopen)
+    result = _ollama().run(_request())
+    assert not result.ok
+    assert "500" in result.error
+
+
+def test_ollama_run_connection_refused(monkeypatch):
+    def fake_urlopen(req, timeout=None):
+        raise error.URLError("connection refused")
+
+    monkeypatch.setattr(ollama_module.request, "urlopen", fake_urlopen)
+    result = _ollama().run(_request())
+    assert not result.ok
+    assert "cannot reach Ollama" in result.error
+
+
+def test_ollama_run_unparseable(monkeypatch):
+    monkeypatch.setattr(
+        ollama_module.request, "urlopen", lambda req, timeout=None: _FakeResp("{}")
+    )
+    result = _ollama().run(_request())
+    assert not result.ok
+    assert "unparseable" in result.error
+
+
+def test_ollama_available_matches_model_by_bare_name(monkeypatch):
+    tags = json.dumps({"models": [{"name": "qwen2.5-coder:latest"}, {"name": "llama3:8b"}]})
+    monkeypatch.setattr(
+        ollama_module.request, "urlopen", lambda url, timeout=None: _FakeResp(tags)
+    )
+    assert _ollama().available() is True
+
+
+def test_ollama_available_false_when_model_missing(monkeypatch):
+    tags = json.dumps({"models": [{"name": "llama3:8b"}]})
+    monkeypatch.setattr(
+        ollama_module.request, "urlopen", lambda url, timeout=None: _FakeResp(tags)
+    )
+    assert _ollama().available() is False
+
+
+def test_ollama_available_false_when_server_down(monkeypatch):
+    def boom(url, timeout=None):
+        raise error.URLError("refused")
+
+    monkeypatch.setattr(ollama_module.request, "urlopen", boom)
+    assert _ollama().available() is False
