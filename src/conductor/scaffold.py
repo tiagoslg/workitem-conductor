@@ -193,7 +193,11 @@ line. Emit one — and only one — per response, on its own line:
 - keep scope to the smallest that satisfies the goal — never invent work;
 - make acceptance criteria concrete and checkable;
 - do not restate or change the `goal` text and do not approve anything;
-- always emit a marker line — it drives the loop.
+- **start your reply with the marker line** (`QUESTIONS:` or `CONTRACT:`) — no
+  preamble or commentary before it; it drives the loop;
+- ask at most one round or two of questions; once you have enough to be useful,
+  **write the CONTRACT** rather than asking for more — a good-enough contract the
+  human can edit beats an endless interview.
 """
 
 AI_GITIGNORE = """\

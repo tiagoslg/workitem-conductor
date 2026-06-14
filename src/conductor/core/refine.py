@@ -44,10 +44,14 @@ _CONTRACT_FIELDS = (
     "stop_conditions",
 )
 
-_CONTRACT_RE = re.compile(r"(?im)^\s*CONTRACT:")
-_QUESTIONS_RE = re.compile(r"(?im)^\s*QUESTIONS:")
+# Markers are matched leniently: smaller models often wrap them in markdown
+# (`**CONTRACT:**`, `## QUESTIONS`, `` `CONTRACT` ``) or drop the colon. We allow
+# leading decoration and an optional trailing colon.
+_CONTRACT_RE = re.compile(r"(?im)^[ \t>#*`]*CONTRACT\b[ \t]*:?")
+_QUESTIONS_RE = re.compile(r"(?im)^[ \t>#*`]*QUESTIONS\b[ \t]*:?")
 _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _LIST_MARKER_RE = re.compile(r"^(?:\d+[.)]|[-*])\s*")
+_CONTRACT_KEYS = set(_CONTRACT_FIELDS)
 
 
 @dataclass
@@ -85,22 +89,63 @@ def _extract_questions(after: str) -> list[str]:
     return questions
 
 
+def _infer_contract(text: str) -> dict | None:
+    """Find any fenced block that parses as a contract (has contract keys).
+
+    Lets a model that wrote the YAML without the literal ``CONTRACT:`` marker
+    still be understood, without misreading an unrelated code block.
+    """
+    for fence in _FENCE_RE.finditer(text):
+        try:
+            data = yaml.safe_load(fence.group(1))
+        except yaml.YAMLError:
+            continue
+        if isinstance(data, dict) and (_CONTRACT_KEYS & set(data)):
+            return data
+    return None
+
+
+def _infer_questions(text: str) -> list[str]:
+    """Read a marker-less list of questions: list items ending in ``?``.
+
+    Requires a list marker and a question mark so prose sentences are not
+    mistaken for questions.
+    """
+    questions: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.endswith("?") and _LIST_MARKER_RE.match(stripped):
+            questions.append(_LIST_MARKER_RE.sub("", stripped).strip())
+    return questions
+
+
 def parse_refine_response(text: str) -> RefineResponse:
-    """Classify a refiner response. ``CONTRACT:`` is terminal and wins over
-    ``QUESTIONS:``; a malformed contract or no marker yields ``unknown``."""
+    """Classify a refiner response, tolerant of models that follow the gate
+    loosely. Contract wins over questions. Order: explicit ``CONTRACT:`` marker →
+    inferred contract (a YAML block with contract keys) → explicit ``QUESTIONS:``
+    marker → inferred questions (a ``?``-terminated list) → ``unknown``."""
     text = text or ""
+
     contract_marker = _CONTRACT_RE.search(text)
     if contract_marker:
         contract = _extract_contract_yaml(text[contract_marker.end():])
         if contract is not None:
             return RefineResponse(kind="contract", contract=contract)
-        return RefineResponse(kind="unknown")
+
+    inferred_contract = _infer_contract(text)
+    if inferred_contract is not None:
+        return RefineResponse(kind="contract", contract=inferred_contract)
 
     questions_marker = _QUESTIONS_RE.search(text)
     if questions_marker:
         questions = _extract_questions(text[questions_marker.end():])
         if questions:
             return RefineResponse(kind="questions", questions=questions)
+
+    inferred_questions = _infer_questions(text)
+    if inferred_questions:
+        return RefineResponse(kind="questions", questions=inferred_questions)
+
     return RefineResponse(kind="unknown")
 
 
@@ -202,6 +247,12 @@ class Refiner:
                     cwd=self.paths.root.parent,
                 )
             )
+            response_kind = (
+                "failed" if not result.ok else parse_refine_response(result.output).kind
+            )
+            # Always persist the raw round so a stop is diagnosable later.
+            self._save_raw(wi, outcome.rounds, result, response_kind)
+
             if not result.ok:
                 return self._stop(
                     wi,
@@ -295,6 +346,23 @@ class Refiner:
             "",
         ]
         (wi.directory / "refine.md").write_text("\n".join(body), encoding="utf-8")
+
+    def _save_raw(self, wi: Workitem, n: int, result, kind: str) -> None:
+        """Persist one round's raw provider output for diagnosis.
+
+        Written every round (success or stop) so a "no marker" failure can be
+        inspected after the fact instead of being lost.
+        """
+        directory = wi.directory / "refine"
+        directory.mkdir(parents=True, exist_ok=True)
+        header = (
+            f"# refine round {n} — provider: {result.provider} — "
+            f"ok: {result.ok} — parsed: {kind}\n\n"
+        )
+        if result.error:
+            header += f"> error: {result.error}\n\n"
+        body = result.output if result.output else "_(empty output)_"
+        (directory / f"{n:02d}-raw.md").write_text(header + body, encoding="utf-8")
 
     def _stop(self, wi: Workitem, outcome: RefineOutcome, reason: str) -> RefineOutcome:
         outcome.stopped_reason = reason
