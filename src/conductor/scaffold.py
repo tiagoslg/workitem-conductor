@@ -108,20 +108,27 @@ where `<kebab-slug>` is a short, lowercase, hyphen-separated name derived from
 the goal (e.g. `feat/add-human-readable-size`). The conductor reads it to
 suggest a working branch before implementation starts.
 
-Then continue with the plan body covering, at minimum:
-- objective and current state;
-- in-scope and out-of-scope work;
-- impacted files/modules;
-- ordered implementation tasks;
-- tests to add or update;
-- risks and acceptance criteria;
-- any ambiguity that should stop and ask the human.
+Then write the implementation plan. Assume the implementer **cannot read the
+repository** — it will only see this plan, the goal contract, and nothing else.
+Every decision the implementer needs to make must be answered here.
+
+The plan must cover at minimum:
+- objective and current state (what exists, what is broken or missing);
+- exact files to create or modify, with their relative paths;
+- for each file: the specific changes to make (functions to add/change/delete,
+  interfaces to define, imports to add);
+- ordered implementation tasks — concrete enough to follow without judgement;
+- tests to add or update, with the expected behaviour to verify;
+- risks and acceptance criteria cross-check;
+- any ambiguity that requires stopping to ask the human.
 
 ## Rules
 - always emit `BRANCH: feat/<kebab-slug>` as the very first line — no preamble;
-- do not write production code;
+- do not write production code — write instructions precise enough that someone
+  else can write it correctly the first time;
 - do not expand the approved scope — surface scope changes as a stop condition;
-- prefer the smallest plan that satisfies the acceptance criteria.
+- prefer the smallest plan that satisfies the acceptance criteria;
+- name every file path explicitly; do not say "update the relevant files".
 """
 
 IMPLEMENTER_MD = """\
@@ -214,7 +221,12 @@ line. Emit one — and only one — per response, on its own line:
   preamble or commentary before it; it drives the loop;
 - ask at most one round or two of questions; once you have enough to be useful,
   **write the CONTRACT** rather than asking for more — a good-enough contract the
-  human can edit beats an endless interview.
+  human can edit beats an endless interview;
+- YAML string values must not contain TypeScript syntax or flow indicators
+  (`{`, `}`, `|`, `?` used as type operators) — describe types in plain English
+  (e.g. "string or number", not "string | number");
+- any YAML value that contains a colon followed by a space (`: `) must be
+  enclosed in single or double quotes.
 """
 
 AI_GITIGNORE = """\

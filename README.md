@@ -230,6 +230,20 @@ B1 (workspace registry) and B2 (read-only dashboard) have shipped — see *Done*
 ### Smaller tweaks
 
 - `init` infers `name` from the directory instead of `TODO`.
+- **`conductor accept`** — after reviewing the result, commit the working tree
+  changes with a message derived from the goal title (`git add -A && git commit
+  -m "..."`). Optional `--push` flag. Keeps the human in control (they still
+  review before running it) but removes the manual git steps.
+- **Live progress indicator during `execute`** — while a CLI provider runs (30–90s
+  blocking call), show a spinner + elapsed timer so the user knows something is
+  happening. Needs an `on_step_start` callback in the engine (called before
+  `provider.run()`); `cli.py` renders a Rich spinner between that and `on_step`.
+- Refiner YAML parse robustness: when a model includes TypeScript-like syntax
+  (`{ type: 'error'|'warning' }`) in a YAML string value, `yaml.safe_load`
+  silently fails and the CONTRACT block is discarded. Fix: (a) add a rule to the
+  refiner prompt to avoid flow indicators in YAML values; (b) a preprocessor
+  fallback in `_extract_contract_yaml` that quotes problematic values before
+  retrying.
 - Refiner prompt polish (emit only the marker block; tighter `scope.include`).
 
 ## Design principle
