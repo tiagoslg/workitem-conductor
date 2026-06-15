@@ -55,7 +55,7 @@ console = Console()
 err_console = Console(stderr=True)
 
 # Provider CLIs the conductor can drive (auth owned externally). Checked by `doctor`.
-KNOWN_PROVIDER_CLIS = ("codex", "claude", "ollama")
+KNOWN_PROVIDER_CLIS = ("codex", "claude", "qwen", "ollama")
 
 
 def _load_paths() -> AiPaths:

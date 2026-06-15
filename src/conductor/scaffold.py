@@ -30,6 +30,11 @@ default_flow: simple-change
 #   claude_cli:
 #     type: cli_one_shot
 #     command: claude
+#   qwen_cli:
+#     type: cli_one_shot              # Qwen Code CLI (headless one-shot)
+#     command: qwen
+#     args: ["--approval-mode", "yolo"]   # omit/use "plan" for read-only roles
+#     prompt_via: arg
 #   qwen_api:
 #     type: api                      # OpenAI-compatible HTTP endpoint
 #     base_url: https://api.example.com/v1
