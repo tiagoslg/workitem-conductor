@@ -527,6 +527,80 @@ def reopen(
 
 
 @app.command()
+def accept(
+    workitem_id: str = typer.Option(
+        None, "--id", help="Workitem to accept (defaults to the active one)."
+    ),
+    push: bool = typer.Option(
+        False, "--push", help="Push to the remote tracking branch after committing."
+    ),
+    message: str = typer.Option(
+        None, "--message", "-m", help="Override the commit message (default: derived from goal title)."
+    ),
+) -> None:
+    """Commit the working tree changes for the active workitem.
+
+    Stages all changes (``git add -A``) and commits with a message derived from
+    the goal title. Use ``--message`` to override. Use ``--push`` to push to the
+    remote tracking branch immediately after.
+
+    You remain in control: review the diff before running this.
+    """
+    paths = _load_paths()
+    wid = workitem_id or get_active_id(paths)
+    if wid is None:
+        err_console.print(
+            "[red]No active workitem.[/red]  Pass --id or run `conductor status --all`."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    commit_msg = message or wi.state.title
+    repo_root = paths.root.parent
+
+    # Stage everything
+    stage = subprocess.run(
+        ["git", "add", "-A"], cwd=repo_root, capture_output=True, text=True
+    )
+    if stage.returncode != 0:
+        err_console.print(f"[red]git add failed:[/red] {stage.stderr.strip()}")
+        raise typer.Exit(code=1)
+
+    # Verify there is something to commit
+    diff_check = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"], cwd=repo_root
+    )
+    if diff_check.returncode == 0:
+        console.print("[yellow]Nothing to commit[/yellow] — working tree is clean.")
+        raise typer.Exit(code=0)
+
+    commit = subprocess.run(
+        ["git", "commit", "-m", commit_msg],
+        cwd=repo_root, capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        err_console.print(f"[red]git commit failed:[/red] {commit.stderr.strip()}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[green]Committed[/green] [bold]{wid}[/bold]")
+    console.print(f"  message: {commit_msg}")
+
+    if push:
+        push_result = subprocess.run(
+            ["git", "push"], cwd=repo_root, capture_output=True, text=True
+        )
+        if push_result.returncode != 0:
+            err_console.print(f"[red]git push failed:[/red] {push_result.stderr.strip()}")
+            raise typer.Exit(code=1)
+        console.print("[green]Pushed.[/green]")
+
+
+@app.command()
 def doctor() -> None:
     """Check local prerequisites (``.ai/`` present, provider CLIs available)."""
     console.print(f"workitem-conductor [dim]v{__version__}[/dim]\n")
