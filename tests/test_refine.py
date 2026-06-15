@@ -4,6 +4,7 @@ import pytest
 
 from conductor.core.refine import (
     Refiner,
+    _extract_contract_yaml,
     parse_refine_response,
 )
 from conductor.paths import AiPaths
@@ -270,3 +271,50 @@ def test_refine_recovers_from_markerless_questions(paths: AiPaths):
 
     assert outcome.updated is True
     assert asked == [["Which config format?", "Which methods retry?"]]
+
+
+# --- _extract_contract_yaml preprocessing fallback ---
+
+def _make_fenced(yaml_text: str) -> str:
+    """Wrap yaml_text in a code fence so _extract_contract_yaml can find it."""
+    return f"\n```yaml\n{yaml_text}\n```\n"
+
+
+def test_yaml_clean_parses_without_fallback():
+    raw = _make_fenced(
+        "scope:\n  include: []\nacceptance_criteria:\n  - works correctly\n"
+    )
+    result = _extract_contract_yaml(raw)
+    assert result is not None
+    assert "scope" in result
+
+
+def test_yaml_flow_indicators_recovered_by_preprocessor():
+    # TypeScript-like syntax: { type: 'a'|'b' } would break yaml.safe_load
+    raw = _make_fenced(
+        "scope:\n  include: []\n"
+        "acceptance_criteria:\n"
+        "  - FlowIssue has fields { type: 'error'|'warning', message: string }\n"
+    )
+    result = _extract_contract_yaml(raw)
+    assert result is not None
+    assert "acceptance_criteria" in result
+
+
+def test_yaml_colon_in_value_recovered_by_preprocessor():
+    # Bare `: ` mid-sentence makes YAML parse the list item as a mapping
+    raw = _make_fenced(
+        "scope:\n  include: []\n"
+        "acceptance_criteria:\n"
+        "  - validateFlow returns FlowIssue[] covering at minimum: broken refs\n"
+    )
+    result = _extract_contract_yaml(raw)
+    assert result is not None
+    assert isinstance(result["acceptance_criteria"][0], str)
+
+
+def test_yaml_genuinely_broken_returns_none():
+    # Malformed beyond what the preprocessor can fix
+    raw = _make_fenced("acceptance_criteria:\n  - [unclosed bracket\n    key: val\n")
+    result = _extract_contract_yaml(raw)
+    assert result is None

@@ -63,15 +63,78 @@ class RefineResponse:
     contract: dict | None = None
 
 
-def _extract_contract_yaml(after: str) -> dict | None:
-    """Parse the fenced YAML block following ``CONTRACT:`` into a dict, or None."""
-    fence = _FENCE_RE.search(after)
-    raw = fence.group(1) if fence else after
+def _preprocess_yaml(text: str) -> str | None:
+    """Quote list-item values that contain YAML flow indicators or bare colons.
+
+    Handles the two most common model mistakes in contract YAML:
+    - TypeScript-like syntax: ``{ type: 'x'|'y' }`` (flow indicators).
+    - Bare colon-space mid-sentence: ``at minimum: broken refs`` (YAML would
+      parse the list item as a nested mapping instead of a plain string).
+
+    Only touches single-line list items (``- value``); leaves mapping keys,
+    already-quoted values, and multi-line block scalars alone.
+    Returns the preprocessed string if it then parses cleanly, else None.
+    """
+    lines = []
+    for line in text.splitlines():
+        m = re.match(r'^(\s*-\s+)(.+)$', line)
+        if m:
+            value = m.group(2)
+            needs_quoting = (
+                re.search(r'[{|}]', value)    # flow indicators
+                or re.search(r'\S:\s', value)  # colon-space mid-sentence
+            )
+            if needs_quoting and not (value.startswith('"') or value.startswith("'")):
+                line = m.group(1) + '"' + value.replace('"', '\\"') + '"'
+        lines.append(line)
+    cleaned = "\n".join(lines)
     try:
-        data = yaml.safe_load(raw)
+        yaml.safe_load(cleaned)
+        return cleaned
     except yaml.YAMLError:
         return None
-    return data if isinstance(data, dict) else None
+
+
+def _contract_list_items_are_strings(data: dict) -> bool:
+    """Return True if all list-valued contract fields contain only strings.
+
+    When a model writes ``at minimum: broken refs`` in a list item, YAML parses
+    it silently as ``{'at minimum': 'broken refs'}`` — no YAMLError, wrong type.
+    """
+    for field in ("acceptance_criteria", "constraints", "validation", "stop_conditions"):
+        for item in data.get(field) or []:
+            if not isinstance(item, str):
+                return False
+    return True
+
+
+def _extract_contract_yaml(after: str) -> dict | None:
+    """Parse the fenced YAML block following ``CONTRACT:`` into a dict, or None.
+
+    Tries the raw block first. If the parse fails (YAMLError) *or* succeeds but
+    list items are dicts instead of strings (silent misparse of bare colons),
+    runs a preprocessing pass that quotes offending values and retries.
+    """
+    fence = _FENCE_RE.search(after)
+    raw = fence.group(1) if fence else after
+
+    try:
+        data = yaml.safe_load(raw)
+        if isinstance(data, dict) and _contract_list_items_are_strings(data):
+            return data
+    except yaml.YAMLError:
+        pass
+
+    preprocessed = _preprocess_yaml(raw)
+    if preprocessed is None:
+        return None
+    try:
+        data = yaml.safe_load(preprocessed)
+        if isinstance(data, dict):
+            return data
+    except yaml.YAMLError:
+        pass
+    return None
 
 
 def _extract_questions(after: str) -> list[str]:
