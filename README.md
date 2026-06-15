@@ -118,11 +118,22 @@ Provider types:
   Qwen, vLLM, LM Studio, a gateway). Requires `base_url`, `model` and
   `api_key_env`; the key is read from that environment variable and **never
   stored**. Uses only the standard library (no extra dependency).
+- **`ollama`** — call a native local Ollama server (`/api/chat`). Only `model` is
+  required; `base_url` defaults to `http://localhost:11434`. No API key (local,
+  unauthenticated). Stdlib only.
+
+```yaml
+providers:
+  local_qwen: { type: ollama, model: qwen2.5-coder }
+roles:
+  refiner: { provider: local_qwen }
+```
 
 `conductor doctor` shows each binding and whether its command is on PATH (for
-`cli_one_shot`) or its API-key env var is set (for `api`). The conductor never
-logs in for you — CLIs must already be authenticated and API keys must be
-exported in your environment.
+`cli_one_shot`), its API-key env var is set (for `api`), or the Ollama server is
+up with the model pulled (for `ollama`). The conductor never logs in for you —
+CLIs must already be authenticated and API keys must be exported in your
+environment.
 
 ## Watching work across projects
 

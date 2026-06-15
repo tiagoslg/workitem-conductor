@@ -21,7 +21,7 @@ from .core.engine import Engine, GoalNotApproved, StepOutcome
 from .core.refine import Refiner
 from .flows.loader import FlowNotFound, load_flow
 from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, require_ai_paths
-from .providers.registry import ProviderConfigError, build_provider_for
+from .providers.registry import ProviderConfigError, build_provider, build_provider_for
 from .scaffold import scaffold_ai
 from .workitems.manager import (
     approve_goal,
@@ -424,6 +424,13 @@ def doctor() -> None:
                         " [green](API key set)[/green]"
                         if key_set
                         else " [yellow](API key env not set)[/yellow]"
+                    )
+                elif provider_cfg.type == "ollama":
+                    provider = build_provider(binding.provider, provider_cfg)
+                    avail = (
+                        " [green](server up · model pulled)[/green]"
+                        if provider.available()
+                        else " [yellow](ollama not reachable / model missing)[/yellow]"
                     )
                 console.print(
                     f"  [green]✓[/green] {role} → {binding.provider} "

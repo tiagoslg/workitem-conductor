@@ -35,6 +35,9 @@ default_flow: simple-change
 #     base_url: https://api.example.com/v1
 #     model: qwen2.5-coder
 #     api_key_env: QWEN_API_KEY      # key is read from this env var, never stored
+#   local_qwen:
+#     type: ollama                   # native local Ollama (no key)
+#     model: qwen2.5-coder           # base_url defaults to http://localhost:11434
 #
 # roles:
 #   refiner:     { provider: codex_cli }   # used by `conductor refine`
