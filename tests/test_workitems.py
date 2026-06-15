@@ -11,6 +11,7 @@ from conductor.workitems.manager import (
     get_active_id,
     list_workitems,
     load_workitem,
+    reopen_workitem,
     save_state,
     slugify,
 )
@@ -111,6 +112,49 @@ def test_approve_goal_reconciles_manual_edit(paths: AiPaths):
     updated = approve_goal(paths, wi.workitem_id)
     assert updated.state.status == "ready"
     assert updated.state.next_action == "execute"
+
+
+def test_reopen_resets_state(paths: AiPaths):
+    wi = create_workitem(paths, "fix the auth bug")
+    approve_goal(paths, wi.workitem_id)
+    # simulate a completed run
+    state = load_workitem(paths, wi.workitem_id).state
+    state.step_index = 3
+    state.stage = "completed"
+    state.status = "completed"
+    state.fix_iterations = 2
+    save_state(paths, state)
+
+    updated = reopen_workitem(paths, wi.workitem_id, "still broken after review")
+
+    assert updated.state.step_index == 0
+    assert updated.state.stage == "defined"
+    assert updated.state.status == "ready"
+    assert updated.state.next_action == "execute"
+    assert updated.state.fix_iterations == 0
+    assert "reopened" in updated.state.history[-1].summary
+
+
+def test_reopen_writes_reopen_md(paths: AiPaths):
+    wi = create_workitem(paths, "add pagination")
+    reopen_workitem(paths, wi.workitem_id, "pagination skipped edge case on empty results")
+    reopen_file = paths.workitem_dir(wi.workitem_id) / "reopen.md"
+    assert reopen_file.is_file()
+    assert "pagination skipped edge case" in reopen_file.read_text(encoding="utf-8")
+
+
+def test_reopen_with_step_index(paths: AiPaths):
+    wi = create_workitem(paths, "improve search")
+    updated = reopen_workitem(paths, wi.workitem_id, "review found a bug", step_index=2)
+    assert updated.state.step_index == 2
+
+
+def test_reopen_overwrites_previous_reopen_md(paths: AiPaths):
+    wi = create_workitem(paths, "refactor endpoints")
+    reopen_workitem(paths, wi.workitem_id, "first reason")
+    reopen_workitem(paths, wi.workitem_id, "second reason")
+    reopen_file = paths.workitem_dir(wi.workitem_id) / "reopen.md"
+    assert reopen_file.read_text(encoding="utf-8") == "second reason"
 
 
 def test_save_and_load_state(paths: AiPaths):

@@ -135,6 +135,33 @@ def approve_goal(paths: AiPaths, workitem_id: str) -> Workitem:
     return load_workitem(paths, workitem_id)
 
 
+def reopen_workitem(
+    paths: AiPaths,
+    workitem_id: str,
+    reason: str,
+    step_index: int = 0,
+) -> Workitem:
+    """Reset a workitem to ready-to-execute with a directed reason for the planner.
+
+    Writes ``reopen.md`` in the workitem directory; ``build_context`` injects it
+    as a ``## Reopen reason`` section so the planner treats the rerun as a
+    directed revision, not a fresh start.
+    """
+    wi = load_workitem(paths, workitem_id)
+    (paths.workitem_dir(workitem_id) / "reopen.md").write_text(
+        reason.strip(), encoding="utf-8"
+    )
+    state = wi.state
+    state.step_index = step_index
+    state.stage = "defined"
+    state.status = "ready"
+    state.next_action = "execute"
+    state.fix_iterations = 0
+    state.record(f"reopened: {reason.strip()[:100]}")
+    save_state(paths, state)
+    return load_workitem(paths, workitem_id)
+
+
 def list_workitems(paths: AiPaths) -> list[str]:
     """All workitem ids, sorted (chronological thanks to the date prefix)."""
     if not paths.workitems_dir.is_dir():
