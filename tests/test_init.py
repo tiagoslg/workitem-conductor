@@ -33,6 +33,17 @@ def test_scaffold_is_idempotent(tmp_path: Path):
     assert set(second.skipped) == EXPECTED
 
 
+def test_scaffold_infers_project_name(tmp_path: Path):
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    root = project_dir / ".ai"
+    scaffold_ai(root)
+
+    repo_yml = (root / "repo.yml").read_text(encoding="utf-8")
+    assert "name: my-project" in repo_yml
+    assert "name: TODO" not in repo_yml
+
+
 def test_scaffold_keeps_user_edits(tmp_path: Path):
     root = tmp_path / ".ai"
     scaffold_ai(root)

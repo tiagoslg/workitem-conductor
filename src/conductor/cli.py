@@ -8,7 +8,9 @@ the direction is visible without pretending to do work.
 from __future__ import annotations
 
 import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import typer
@@ -55,7 +57,7 @@ console = Console()
 err_console = Console(stderr=True)
 
 # Provider CLIs the conductor can drive (auth owned externally). Checked by `doctor`.
-KNOWN_PROVIDER_CLIS = ("codex", "claude", "ollama")
+KNOWN_PROVIDER_CLIS = ("codex", "claude", "qwen", "ollama")
 
 
 def _load_paths() -> AiPaths:
@@ -352,6 +354,28 @@ def execute(
         console.print(
             f"  {mark} {step.role} [dim]({step.stage} · {step.provider})[/dim] → {rel}{extra}"
         )
+
+        if step.role == "planner" and step.ok:
+            output = step.output_path.read_text(encoding="utf-8")
+            m = re.search(r"^BRANCH:\s*(\S+)", output, re.MULTILINE)
+            if m:
+                branch = m.group(1).strip()
+                console.print(f"\n  [dim]Suggested branch:[/dim] [bold]{branch}[/bold]")
+                if typer.confirm(f"  Create and switch to '{branch}' now?", default=True):
+                    try:
+                        subprocess.run(
+                            ["git", "checkout", "-b", branch],
+                            cwd=paths.root.parent,
+                            check=True,
+                            capture_output=True,
+                            text=True,
+                        )
+                        console.print(f"  [green]✓[/green] switched to branch '{branch}'")
+                    except subprocess.CalledProcessError as exc:
+                        console.print(
+                            f"  [yellow]![/yellow] could not create branch: "
+                            f"{exc.stderr.strip() or 'already exists?'}"
+                        )
 
     try:
         outcome = engine.run(wid, on_step=on_step)

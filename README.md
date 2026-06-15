@@ -102,6 +102,7 @@ config alone. Unbound roles run in dry-run.
 providers:
   codex_cli:  { type: cli_one_shot, command: codex, args: ["exec"], prompt_via: arg }
   claude_cli: { type: cli_one_shot, command: claude, args: ["-p"],   prompt_via: arg }
+  qwen_cli:   { type: cli_one_shot, command: qwen, args: ["--approval-mode", "yolo"], prompt_via: arg }
   qwen_api:   { type: api, base_url: https://api.example.com/v1, model: qwen2.5-coder, api_key_env: QWEN_API_KEY }
 roles:
   planner:     { provider: codex_cli }
@@ -112,8 +113,11 @@ roles:
 
 Provider types:
 
-- **`cli_one_shot`** — drive a headless coding-agent CLI (Codex, Claude) via
-  stdin or an argument.
+- **`cli_one_shot`** — drive a headless coding-agent CLI (Codex, Claude, Qwen
+  Code) via stdin or an argument. The CLI manages its own auth. For CLIs that
+  gate file edits behind approval (Qwen Code), pass the auto-approve flag in
+  `args` for roles that must write — e.g. `args: ["--approval-mode", "yolo"]`
+  for an implementer — and a read-only/plan flag (or none) for a reviewer.
 - **`api`** — call an OpenAI-compatible `chat/completions` endpoint (OpenAI,
   Qwen, vLLM, LM Studio, a gateway). Requires `base_url`, `model` and
   `api_key_env`; the key is read from that environment variable and **never

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -197,3 +198,34 @@ def test_engine_stops_on_provider_failure(paths: AiPaths):
     reloaded = load_workitem(paths, wi.workitem_id)
     assert reloaded.state.status == "blocked"
     assert reloaded.state.step_index == 0  # did not advance past the failed step
+
+
+# --- BRANCH: marker extraction (unit, no subprocess) ---
+
+_BRANCH_RE = re.compile(r"^BRANCH:\s*(\S+)", re.MULTILINE)
+
+
+def test_branch_marker_extracted_from_planner_output():
+    output = "BRANCH: feat/add-slugify\n\n## Objective\nAdd the helper.\n"
+    m = _BRANCH_RE.search(output)
+    assert m is not None
+    assert m.group(1) == "feat/add-slugify"
+
+
+def test_branch_marker_anywhere_in_output():
+    output = "## Plan\n\nBRANCH: feat/fix-policy-bug\n\nMore text."
+    m = _BRANCH_RE.search(output)
+    assert m is not None
+    assert m.group(1) == "feat/fix-policy-bug"
+
+
+def test_branch_marker_absent_returns_none():
+    output = "## Plan\n\nNo branch line here.\n"
+    assert _BRANCH_RE.search(output) is None
+
+
+def test_branch_marker_ignores_extra_whitespace():
+    output = "BRANCH:   feat/my-feature  \n"
+    m = _BRANCH_RE.search(output)
+    assert m is not None
+    assert m.group(1).strip() == "feat/my-feature"
