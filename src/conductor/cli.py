@@ -18,13 +18,14 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .config.loader import RepoConfigError, load_repo_config
+from .config.loader import RepoConfigError, load_repo_config, load_workspace_config
+from .core.context import build_cross_project_section
 from .core.engine import Engine, GoalNotApproved, StepOutcome
 from .core.refine import Refiner
 from .flows.loader import FlowNotFound, load_flow
-from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, require_ai_paths
+from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, WorkspacePaths, require_ai_paths
 from .providers.registry import ProviderConfigError, build_provider, build_provider_for
-from .scaffold import scaffold_ai
+from .scaffold import scaffold_ai, scaffold_workspace
 from .workitems.manager import (
     approve_goal,
     create_workitem,
@@ -38,6 +39,7 @@ from .workspaces import (
     add_project,
     list_projects,
     load_registry,
+    load_workspace_paths,
     registry_path,
     remove_project,
     save_registry,
@@ -69,6 +71,26 @@ def _load_paths() -> AiPaths:
         raise typer.Exit(code=1) from exc
 
 
+def _load_ws_paths(name: str) -> WorkspacePaths:
+    """Resolve a workspace name to WorkspacePaths, or exit cleanly."""
+    registry = _load_registry()
+    if name not in registry.workspaces:
+        err_console.print(
+            f"[red]Workspace '{name}' not found.[/red]  "
+            f"Run `conductor workspace add <path> -w {name}` first."
+        )
+        raise typer.Exit(code=1)
+    ws_paths = load_workspace_paths(name)
+    if not ws_paths.config.exists():
+        result = scaffold_workspace(ws_paths.root, name)
+        for f in result.created:
+            console.print(f"  [green]+[/green] {ws_paths.root}/{f}")
+        console.print(
+            f"  [dim]Edit [bold]{ws_paths.config}[/bold] to bind providers/roles.[/dim]\n"
+        )
+    return ws_paths
+
+
 @app.command()
 def init() -> None:
     """Initialize the ``.ai/`` skeleton in the current repository."""
@@ -96,6 +118,10 @@ def define(
     goal: str = typer.Argument(
         None, help="A short statement of the change you want."
     ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w",
+        help="Create a cross-project workitem in this workspace instead of the current repo."
+    ),
 ) -> None:
     """Create a workitem and an editable goal contract from a goal statement."""
     if not goal or not goal.strip():
@@ -103,6 +129,19 @@ def define(
             '[red]A goal is required.[/red]  Example: conductor define "fix the policy discovery bug"'
         )
         raise typer.Exit(code=1)
+
+    if workspace:
+        paths = _load_ws_paths(workspace)
+        workitem = create_workitem(paths, goal, flow="workspace-analysis")
+        goal_file = workitem.directory / "goal.yml"
+        console.print(f"[green]Created workspace workitem[/green] [bold]{workitem.workitem_id}[/bold]")
+        console.print(f"  workspace: {workspace}  ({len(paths.project_roots)} projects)")
+        console.print(f"  goal:  {goal_file}")
+        console.print(
+            f"\nNext: run [bold]conductor refine -w {workspace}[/bold] for cross-project analysis,\n"
+            f"or edit goal.yml by hand — then [bold]conductor approve -w {workspace}[/bold]."
+        )
+        return
 
     paths = _load_paths()
     workitem = create_workitem(paths, goal)
@@ -123,9 +162,12 @@ def approve(
     workitem_id: str = typer.Argument(
         None, help="Workitem to approve (defaults to the active one)."
     ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w", help="Approve a cross-project workitem in this workspace."
+    ),
 ) -> None:
     """Approve the goal contract and mark the workitem ready to execute."""
-    paths = _load_paths()
+    paths = _load_ws_paths(workspace) if workspace else _load_paths()
     wid = workitem_id or get_active_id(paths)
     if wid is None:
         err_console.print(
@@ -159,6 +201,10 @@ def refine(
     workitem_id: str = typer.Argument(
         None, help="Workitem to refine (defaults to the active one)."
     ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w",
+        help="Refine a cross-project workitem in this workspace."
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", "-n", help="Force the dry-run provider (no real model)."
     ),
@@ -169,8 +215,15 @@ def refine(
     asks clarifying questions or writes scope/acceptance criteria/constraints/
     validation/stop conditions back to goal.yml. It never approves — run
     `conductor approve` after reviewing the result.
+
+    With ``-w <workspace>``, the refiner receives cross-project context from all
+    repos in the workspace so it can reason about cross-project bugs and changes.
     """
-    paths = _load_paths()
+    if workspace:
+        paths = _load_ws_paths(workspace)
+    else:
+        paths = _load_paths()
+
     wid = workitem_id or get_active_id(paths)
     if wid is None:
         err_console.print(
@@ -185,15 +238,26 @@ def refine(
         raise typer.Exit(code=1)
 
     try:
-        config = load_repo_config(paths)
+        config = (
+            load_workspace_config(paths) if workspace else load_repo_config(paths)
+        )
     except RepoConfigError as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
 
+    workspace_info = build_cross_project_section(paths) if workspace else None
     provider_for = build_provider_for(config, dry_run=dry_run)
-    refiner = Refiner(paths, provider_for, max_rounds=config.refine.max_question_rounds)
+    refiner = Refiner(
+        paths,
+        provider_for,
+        max_rounds=config.refine.max_question_rounds,
+        workspace_info=workspace_info,
+    )
 
-    mode = "[yellow]dry-run[/yellow]" if dry_run else "refiner from repo.yml"
+    mode = "[yellow]dry-run[/yellow]" if dry_run else (
+        f"refiner from workspace config · [dim]{len(paths.project_roots)} projects[/dim]"
+        if workspace else "refiner from repo.yml"
+    )
     console.print(f"Refining [bold]{wid}[/bold] · {mode}\n")
 
     def ask(questions: list[str]) -> list[str]:
@@ -237,9 +301,12 @@ def status(
     all_: bool = typer.Option(
         False, "--all", "-a", help="List every workitem instead of just the active one."
     ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w", help="Show workitems from this workspace."
+    ),
 ) -> None:
     """Show the active workitem (or all workitems with --all)."""
-    paths = _load_paths()
+    paths = _load_ws_paths(workspace) if workspace else _load_paths()
     ids = list_workitems(paths)
 
     if not ids:

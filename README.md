@@ -197,20 +197,36 @@ across projects).
   (stdlib-only), alongside the `cli_one_shot` providers. The refiner gate is
   tolerant of models that follow it loosely (markers inferred; each round's raw
   output captured under the workitem for diagnosis).
+- **`ollama` provider** — native local models via Ollama (`/api/chat`); no API
+  key required; `base_url` defaults to `http://localhost:11434`.
+- **Context/token strategy** — prior step outputs are deduped by role (most
+  recent per role only) and capped at 8 000 chars each; fix-iteration header
+  added so agents know they are in a fix loop.
+- **Refiner YAML robustness** — prompt rule to avoid TypeScript-like syntax in
+  YAML values; `_preprocess_yaml` fallback that quotes problematic values before
+  retrying `yaml.safe_load`; `_contract_list_items_are_strings` guard against
+  silent mapping mis-parses.
 - **Visibility B1–B2:** a global **workspace registry** (`conductor workspace
   add/list/remove`, stored under `~/.config/conductor/`) and a **read-only
   dashboard** (`conductor dashboard`) — an on-demand localhost web view that
   scans the registered projects and renders every workitem's state. Pure read,
   loopback-only.
+- **Cross-project workitems** — `conductor define/refine/approve/status -w
+  <workspace>` creates workitems that live at the workspace level (under
+  `~/.config/conductor/workspaces/<name>/`). The refiner receives context from
+  all repos in the workspace (instructions + paths) so it can reason about
+  cross-project bugs and changes. Produces a cross-project contract the human
+  uses to create individual workitems per repo.
 
 ### Track A — execution
 
-- **`ollama` provider** — native local models (reuses the `api` HTTP path).
-- **Context/token strategy** — summarise prior step outputs between steps instead
-  of replaying them verbatim (today's context grows with every fix iteration).
+- **`conductor reopen "<reason>"` command** — resets `step_index`, `stage` and
+  `status` to restart execution, and writes a `reopen.md` with the human's
+  reason. The context builder injects it as a `## Reopen reason` section so the
+  planner treats the rerun as a directed revision of the prior plan, not a fresh
+  start. Optional `--from <role>` to restart from a specific step.
 - **Semantic stop conditions** — scope change, secrets/prod access,
   reviewer/implementer deadlock (the deterministic caps already exist).
-- **Reopen/re-run** a completed workitem (`reopen` / `execute --from <step>`).
 - **`cli_pty` provider** *(on-demand)* — drive interactive-only CLIs via a
   pseudo-terminal; the most brittle provider, built only when a needed CLI lacks
   a headless mode.
@@ -220,7 +236,8 @@ across projects).
 
 ### Track B — visibility / UX
 
-B1 (workspace registry) and B2 (read-only dashboard) have shipped — see *Done*.
+B1 (workspace registry), B2 (read-only dashboard), and cross-project workitems
+have shipped — see *Done*.
 
 - **B3 — interactive layer** *(next on this track)*: a config cascade (global →
   workspace → repo `.ai/` overrides) for per-step model defaults, plus
@@ -229,7 +246,6 @@ B1 (workspace registry) and B2 (read-only dashboard) have shipped — see *Done*
 
 ### Smaller tweaks
 
-- `init` infers `name` from the directory instead of `TODO`.
 - **`conductor accept`** — after reviewing the result, commit the working tree
   changes with a message derived from the goal title (`git add -A && git commit
   -m "..."`). Optional `--push` flag. Keeps the human in control (they still
@@ -238,13 +254,6 @@ B1 (workspace registry) and B2 (read-only dashboard) have shipped — see *Done*
   blocking call), show a spinner + elapsed timer so the user knows something is
   happening. Needs an `on_step_start` callback in the engine (called before
   `provider.run()`); `cli.py` renders a Rich spinner between that and `on_step`.
-- Refiner YAML parse robustness: when a model includes TypeScript-like syntax
-  (`{ type: 'error'|'warning' }`) in a YAML string value, `yaml.safe_load`
-  silently fails and the CONTRACT block is discarded. Fix: (a) add a rule to the
-  refiner prompt to avoid flow indicators in YAML values; (b) a preprocessor
-  fallback in `_extract_contract_yaml` that quotes problematic values before
-  retrying.
-- Refiner prompt polish (emit only the marker block; tighter `scope.include`).
 
 ## Design principle
 
