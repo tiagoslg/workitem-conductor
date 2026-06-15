@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import yaml
 from pydantic import ValidationError
 
-from ..paths import AiPaths
+from ..paths import AiPaths, WorkspacePaths
 from ..providers.base import Provider, ProviderRequest
 from ..workitems.manager import Workitem, load_workitem, save_goal, save_state
 from ..workitems.models import GoalContract, utcnow_iso
@@ -212,13 +212,23 @@ def parse_refine_response(text: str) -> RefineResponse:
     return RefineResponse(kind="unknown")
 
 
-def build_refine_context(paths: AiPaths, workitem: Workitem, transcript: str) -> str:
-    """Compose the prompt for one refine round: role + repo instructions + goal +
-    the Q&A so far. Distinct from the execution context, which replays step
-    outputs (irrelevant before any step has run)."""
+def build_refine_context(
+    paths: AiPaths | WorkspacePaths,
+    workitem: Workitem,
+    transcript: str,
+    workspace_info: str | None = None,
+) -> str:
+    """Compose the prompt for one refine round: role + instructions + goal + Q&A.
+
+    When ``workspace_info`` is provided (workspace mode), the cross-project
+    context replaces the single-repo instructions section.
+    """
     parts: list[str] = [load_role_prompt(paths, "refiner").rstrip()]
 
-    if paths.instructions.is_file():
+    if workspace_info is not None:
+        parts.append("\n---\n")
+        parts.append(workspace_info)
+    elif paths.instructions.is_file():
         parts.append("\n---\n## Repository instructions\n")
         parts.append(paths.instructions.read_text(encoding="utf-8").rstrip())
 
@@ -276,13 +286,15 @@ class Refiner:
 
     def __init__(
         self,
-        paths: AiPaths,
+        paths: AiPaths | WorkspacePaths,
         provider_for: ProviderFor,
         max_rounds: int = DEFAULT_MAX_ROUNDS,
+        workspace_info: str | None = None,
     ) -> None:
         self.paths = paths
         self.provider_for = provider_for
         self.max_rounds = max_rounds
+        self.workspace_info = workspace_info
 
     def run(
         self,
@@ -300,14 +312,17 @@ class Refiner:
         while True:
             outcome.rounds += 1
             prompt = build_refine_context(
-                self.paths, wi, "\n\n".join(transcript_parts)
+                self.paths,
+                wi,
+                "\n\n".join(transcript_parts),
+                workspace_info=self.workspace_info,
             )
             result = provider.run(
                 ProviderRequest(
                     role="refiner",
                     prompt=prompt,
                     workitem_id=workitem_id,
-                    cwd=self.paths.root.parent,
+                    cwd=self.paths.cwd,
                 )
             )
             response_kind = (

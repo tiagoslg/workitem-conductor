@@ -9,9 +9,13 @@ Each prior output is capped at _MAX_OUTPUT_CHARS to keep prompts bounded.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..paths import AiPaths
 from ..workitems.manager import Workitem
+
+if TYPE_CHECKING:
+    from ..paths import WorkspacePaths
 
 _FALLBACK_ROLE_PROMPT = (
     "# Role: {role}\n\n"
@@ -23,16 +27,47 @@ _FALLBACK_ROLE_PROMPT = (
 _MAX_OUTPUT_CHARS = 8_000  # ~2k tokens; enough for a full plan or detailed review
 
 
-def load_role_prompt(paths: AiPaths, role: str) -> str:
-    """Return the role's instructions from ``.ai/roles/<role>.md``.
+def load_role_prompt(paths: AiPaths | WorkspacePaths, role: str) -> str:
+    """Return the role's instructions from ``roles/<role>.md``.
 
-    Falls back to a generic instruction when no prompt file exists, so custom
-    roles in a flow don't require a prompt file to be runnable.
+    Accepts both ``AiPaths`` (.ai/roles/) and ``WorkspacePaths`` (workspace/roles/).
+    Falls back to a generic instruction when no file exists.
     """
     role_file = paths.roles_dir / f"{role}.md"
     if role_file.is_file():
         return role_file.read_text(encoding="utf-8")
     return _FALLBACK_ROLE_PROMPT.format(role=role)
+
+
+def build_cross_project_section(ws_paths: WorkspacePaths) -> str:
+    """Build the cross-project context block for workspace refine/plan prompts.
+
+    Includes the workspace instructions (if any) and each project's .ai/instructions.md
+    (labeled by project name and path), so the refiner/planner can reason across repos.
+    """
+    from pathlib import Path as _Path
+    from ..paths import AI_DIRNAME
+
+    parts: list[str] = []
+
+    if ws_paths.instructions.is_file():
+        parts.append("## Workspace instructions\n")
+        parts.append(ws_paths.instructions.read_text(encoding="utf-8").rstrip())
+
+    parts.append("\n## Projects in this workspace\n")
+    for repo_path in ws_paths.project_roots:
+        label = repo_path.name
+        parts.append(f"### {label}\n- path: `{repo_path}`")
+        instructions = repo_path / AI_DIRNAME / "instructions.md"
+        if instructions.is_file():
+            parts.append(
+                "- instructions:\n\n"
+                + instructions.read_text(encoding="utf-8").rstrip()
+            )
+        else:
+            parts.append("- instructions: _(none — run `conductor init` in this repo)_")
+
+    return "\n".join(parts)
 
 
 def _prior_outputs(workitem: Workitem) -> list[tuple[str, str]]:

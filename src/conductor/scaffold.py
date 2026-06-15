@@ -229,6 +229,37 @@ line. Emit one — and only one — per response, on its own line:
   enclosed in single or double quotes.
 """
 
+WORKSPACE_CONFIG_YML = """\
+# workitem-conductor workspace configuration
+# Providers and roles used for cross-project workitems in this workspace.
+# Same format as .ai/repo.yml in individual repos.
+#
+# providers:
+#   claude_cli:
+#     type: cli_one_shot
+#     command: claude
+#     args: ["-p"]
+#     prompt_via: arg
+#
+# roles:
+#   refiner: { provider: claude_cli }
+providers: {}
+roles: {}
+"""
+
+WORKSPACE_INSTRUCTIONS_MD = """\
+# Workspace instructions: {name}
+
+Cross-project context for the refiner and planner.
+Describe:
+- how the projects in this workspace relate to each other
+  (e.g. the FE calls the BE REST API at /api/v1/...);
+- shared conventions that apply across all repos;
+- any context a human analyst would need to reason about cross-project bugs.
+
+Keep this short and concrete.
+"""
+
 AI_GITIGNORE = """\
 # Runtime artifacts — not versioned by default.
 workitems/
@@ -256,6 +287,28 @@ _FILES: tuple[tuple[str, str], ...] = (
     ("roles/refiner.md", REFINER_MD),
     (".gitignore", AI_GITIGNORE),
 )
+
+
+def scaffold_workspace(root: Path, name: str) -> ScaffoldResult:
+    """Create workspace config skeleton under ``root`` idempotently.
+
+    ``root`` is the workspace directory itself
+    (``~/.config/conductor/workspaces/<name>/``). Existing files are kept.
+    """
+    result = ScaffoldResult()
+    root.mkdir(parents=True, exist_ok=True)
+    files = [
+        ("config.yml", WORKSPACE_CONFIG_YML),
+        ("instructions.md", WORKSPACE_INSTRUCTIONS_MD.format(name=name)),
+    ]
+    for rel, content in files:
+        target = root / rel
+        if target.exists():
+            result.skipped.append(rel)
+        else:
+            target.write_text(content, encoding="utf-8")
+            result.created.append(rel)
+    return result
 
 
 def scaffold_ai(root: Path) -> ScaffoldResult:
