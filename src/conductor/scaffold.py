@@ -100,7 +100,15 @@ implementer can execute with minimal independent decisions.
 - the repository and its instructions.
 
 ## Output
-A plan covering, at minimum:
+The **first line** of your response must be:
+
+    BRANCH: feat/<kebab-slug>
+
+where `<kebab-slug>` is a short, lowercase, hyphen-separated name derived from
+the goal (e.g. `feat/add-human-readable-size`). The conductor reads it to
+suggest a working branch before implementation starts.
+
+Then continue with the plan body covering, at minimum:
 - objective and current state;
 - in-scope and out-of-scope work;
 - impacted files/modules;
@@ -110,6 +118,7 @@ A plan covering, at minimum:
 - any ambiguity that should stop and ask the human.
 
 ## Rules
+- always emit `BRANCH: feat/<kebab-slug>` as the very first line — no preamble;
 - do not write production code;
 - do not expand the approved scope — surface scope changes as a stop condition;
 - prefer the smallest plan that satisfies the acceptance criteria.
@@ -244,7 +253,10 @@ def scaffold_ai(root: Path) -> ScaffoldResult:
     """
     result = ScaffoldResult()
     root.mkdir(parents=True, exist_ok=True)
+    project_name = root.parent.name
     for rel, content in _FILES:
+        if rel == "repo.yml":
+            content = content.replace("name: TODO", f"name: {project_name}", 1)
         target = root / rel
         if target.exists():
             result.skipped.append(rel)
