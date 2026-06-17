@@ -97,3 +97,27 @@ def test_no_fix_loop_header_on_first_run(paths, workitem):
 def test_no_prior_outputs_section_when_empty(paths, workitem):
     ctx = build_context(paths, workitem, "planner")
     assert "Prior step outputs" not in ctx
+
+
+# --- reopen reason injection ---
+
+def test_reopen_reason_injected_when_file_present(paths, workitem):
+    (workitem.directory / "reopen.md").write_text(
+        "reviewer flagged missing null-check", encoding="utf-8"
+    )
+    ctx = build_context(paths, workitem, "planner")
+    assert "## Reopen reason" in ctx
+    assert "reviewer flagged missing null-check" in ctx
+
+
+def test_no_reopen_section_when_file_absent(paths, workitem):
+    ctx = build_context(paths, workitem, "planner")
+    assert "Reopen reason" not in ctx
+
+
+def test_reopen_reason_appears_after_goal_contract(paths, workitem):
+    (workitem.directory / "reopen.md").write_text("try again", encoding="utf-8")
+    ctx = build_context(paths, workitem, "planner")
+    goal_pos = ctx.index("## Goal contract")
+    reopen_pos = ctx.index("## Reopen reason")
+    assert goal_pos < reopen_pos

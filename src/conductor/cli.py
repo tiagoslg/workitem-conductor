@@ -32,6 +32,7 @@ from .workitems.manager import (
     get_active_id,
     list_workitems,
     load_workitem,
+    reopen_workitem,
 )
 from .workspaces import (
     DEFAULT_WORKSPACE,
@@ -462,6 +463,141 @@ def execute(
     else:
         console.print(f"\n[yellow]Stopped:[/yellow] {outcome.stopped_reason}")
         raise typer.Exit(code=1)
+
+
+@app.command()
+def reopen(
+    reason: str = typer.Argument(..., help="Why you're reopening — the planner receives this as directed context."),
+    workitem_id: str = typer.Option(
+        None, "--id", help="Workitem to reopen (defaults to the active one)."
+    ),
+    from_role: str = typer.Option(
+        None, "--from", help="Restart from this role's step (default: start of flow)."
+    ),
+) -> None:
+    """Reopen a completed or blocked workitem with a directed reason.
+
+    Resets the execution state and writes a ``reopen.md`` so the planner
+    treats the rerun as a directed revision of the prior plan, not a fresh
+    start. Use ``--from <role>`` to restart from a specific step instead of
+    the beginning of the flow.
+    """
+    paths = _load_paths()
+    wid = workitem_id or get_active_id(paths)
+    if wid is None:
+        err_console.print(
+            "[red]No workitem to reopen.[/red]  Run `conductor status --all` to list workitems."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    step_index = 0
+    if from_role:
+        try:
+            flow = load_flow(paths, wi.state.flow)
+        except FlowNotFound as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+        idx = flow.index_of_role(from_role)
+        if idx is None:
+            available = ", ".join(s.role for s in flow.steps)
+            err_console.print(
+                f"[red]Role '{from_role}' not in flow '{wi.state.flow}'.[/red]  "
+                f"Available: {available}"
+            )
+            raise typer.Exit(code=1)
+        step_index = idx
+
+    updated = reopen_workitem(paths, wid, reason, step_index=step_index)
+    console.print(f"[green]Reopened[/green] [bold]{updated.workitem_id}[/bold]")
+    console.print(f"  reason: {reason}")
+    if from_role:
+        console.print(f"  restart from: {from_role} (step index {step_index})")
+    console.print(
+        f"  state: stage=[cyan]{updated.state.stage}[/cyan] "
+        f"status=[yellow]{updated.state.status}[/yellow] "
+        f"next=[bold]{updated.state.next_action}[/bold]"
+    )
+    console.print("\nNext: [bold]conductor execute[/bold]")
+
+
+@app.command()
+def accept(
+    workitem_id: str = typer.Option(
+        None, "--id", help="Workitem to accept (defaults to the active one)."
+    ),
+    push: bool = typer.Option(
+        False, "--push", help="Push to the remote tracking branch after committing."
+    ),
+    message: str = typer.Option(
+        None, "--message", "-m", help="Override the commit message (default: derived from goal title)."
+    ),
+) -> None:
+    """Commit the working tree changes for the active workitem.
+
+    Stages all changes (``git add -A``) and commits with a message derived from
+    the goal title. Use ``--message`` to override. Use ``--push`` to push to the
+    remote tracking branch immediately after.
+
+    You remain in control: review the diff before running this.
+    """
+    paths = _load_paths()
+    wid = workitem_id or get_active_id(paths)
+    if wid is None:
+        err_console.print(
+            "[red]No active workitem.[/red]  Pass --id or run `conductor status --all`."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    commit_msg = message or wi.state.title
+    repo_root = paths.root.parent
+
+    # Stage everything
+    stage = subprocess.run(
+        ["git", "add", "-A"], cwd=repo_root, capture_output=True, text=True
+    )
+    if stage.returncode != 0:
+        err_console.print(f"[red]git add failed:[/red] {stage.stderr.strip()}")
+        raise typer.Exit(code=1)
+
+    # Verify there is something to commit
+    diff_check = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"], cwd=repo_root
+    )
+    if diff_check.returncode == 0:
+        console.print("[yellow]Nothing to commit[/yellow] — working tree is clean.")
+        raise typer.Exit(code=0)
+
+    commit = subprocess.run(
+        ["git", "commit", "-m", commit_msg],
+        cwd=repo_root, capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        err_console.print(f"[red]git commit failed:[/red] {commit.stderr.strip()}")
+        raise typer.Exit(code=1)
+
+    console.print(f"[green]Committed[/green] [bold]{wid}[/bold]")
+    console.print(f"  message: {commit_msg}")
+
+    if push:
+        push_result = subprocess.run(
+            ["git", "push"], cwd=repo_root, capture_output=True, text=True
+        )
+        if push_result.returncode != 0:
+            err_console.print(f"[red]git push failed:[/red] {push_result.stderr.strip()}")
+            raise typer.Exit(code=1)
+        console.print("[green]Pushed.[/green]")
 
 
 @app.command()

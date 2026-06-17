@@ -123,6 +123,11 @@ def build_context(paths: AiPaths, workitem: Workitem, role: str) -> str:
     parts.append("\n## Goal contract\n")
     parts.append("```yaml\n" + workitem.goal.to_yaml().rstrip() + "\n```")
 
+    reopen_file = workitem.directory / "reopen.md"
+    if reopen_file.is_file():
+        parts.append("\n## Reopen reason\n")
+        parts.append(reopen_file.read_text(encoding="utf-8").strip())
+
     prior = _prior_outputs(workitem)
     if prior:
         header = "\n## Prior step outputs\n"
