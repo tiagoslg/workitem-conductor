@@ -11,17 +11,37 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.status import Status as _RichStatus
 from rich.table import Table
 
 from . import __version__
-from .config.loader import RepoConfigError, load_repo_config, load_workspace_config
+from .config.loader import (
+    RepoConfigError,
+    _provider_to_dict,
+    load_global_defaults,
+    load_repo_config,
+    load_workspace_config,
+    save_global_defaults,
+)
+from .config.models import ProviderConfig, RepoConfig, RoleBinding
 from .core.context import build_cross_project_section
 from .core.engine import Engine, GoalNotApproved, StepOutcome
 from .core.refine import Refiner
+from .core.workspace_engine import ProjectStepOutcome, WorkspaceEngine
+from .core.worktree import (
+    branch_name as worktree_branch,
+    commit_worktree,
+    create_worktree,
+    merge_worktree,
+    remove_worktree,
+    worktree_path,
+)
 from .flows.loader import FlowNotFound, load_flow
 from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, WorkspacePaths, require_ai_paths
 from .providers.registry import ProviderConfigError, build_provider, build_provider_for
@@ -33,6 +53,7 @@ from .workitems.manager import (
     list_workitems,
     load_workitem,
     reopen_workitem,
+    save_state,
 )
 from .workspaces import (
     DEFAULT_WORKSPACE,
@@ -46,6 +67,19 @@ from .workspaces import (
     save_registry,
 )
 
+_CONVENTIONAL_PREFIXES = ("feat", "fix", "chore", "refactor", "docs", "test", "style", "perf")
+
+
+def _build_commit_msg(title: str, feature_branch: str | None, workitem_id: str) -> str:
+    """Conventional commit message derived from the feature branch name."""
+    prefix = ""
+    if feature_branch and "/" in feature_branch:
+        kind = feature_branch.split("/")[0]
+        if kind in _CONVENTIONAL_PREFIXES:
+            prefix = f"{kind}: "
+    return f"{prefix}{title}\n\nWorkitem: {workitem_id}"
+
+
 app = typer.Typer(
     help="Local conductor for AI-assisted development workflows.",
     no_args_is_help=True,
@@ -58,6 +92,78 @@ workspace_app = typer.Typer(
 app.add_typer(workspace_app, name="workspace")
 console = Console()
 err_console = Console(stderr=True)
+
+
+class _SpinnerGuard:
+    """Shows a rich spinner with a live elapsed timer between provider calls.
+
+    A background thread updates the status text every second so the counter
+    ticks while the main thread is blocked on a subprocess call.
+
+    When ``stream=True``, the spinner is suppressed and only time tracking is
+    active — elapsed time is still available via ``stop()`` for completion lines.
+    """
+
+    def __init__(self, stream: bool = False) -> None:
+        self._stream = stream
+        self._status: _RichStatus | None = None
+        self._t0: float = 0.0
+        self._base_text: str = ""
+        self._stop_evt = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _fmt_elapsed(self) -> str:
+        s = int(time.monotonic() - self._t0)
+        m, r = divmod(s, 60)
+        return f"{m}m {r:02d}s" if m else f"{s}s"
+
+    def _updater(self) -> None:
+        while not self._stop_evt.wait(timeout=1.0):
+            if self._status:
+                self._status.update(
+                    f"{self._base_text}  [dim]{self._fmt_elapsed()}[/dim]"
+                )
+
+    def start(self, text: str) -> None:
+        self._t0 = time.monotonic()
+        if self._stream:
+            return
+
+        # Tear down any previous spinner + timer thread.
+        self._stop_evt.set()
+        if self._thread:
+            self._thread.join()
+        if self._status:
+            self._status.stop()
+
+        self._base_text = text
+        self._stop_evt.clear()
+
+        self._status = _RichStatus(text, console=console, spinner="dots")
+        self._status.start()
+
+        self._thread = threading.Thread(target=self._updater, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> float:
+        """Stop the spinner and return elapsed seconds since start()."""
+        elapsed = time.monotonic() - self._t0
+        if not self._stream:
+            self._stop_evt.set()
+            if self._thread:
+                self._thread.join()
+                self._thread = None
+            if self._status:
+                self._status.stop()
+                self._status = None
+        return elapsed
+
+    def __enter__(self) -> "_SpinnerGuard":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.stop()
+
 
 # Provider CLIs the conductor can drive (auth owned externally). Checked by `doctor`.
 KNOWN_PROVIDER_CLIS = ("codex", "claude", "qwen", "ollama")
@@ -92,6 +198,32 @@ def _load_ws_paths(name: str) -> WorkspacePaths:
     return ws_paths
 
 
+def _ensure_ai_in_gitignore(project_root: Path) -> str:
+    """Add ``.ai/`` to the project's root .gitignore if not already present.
+
+    Returns ``"added"`` if the entry was appended to an existing file,
+    ``"created"`` if a new .gitignore was created, or ``"exists"`` if the
+    entry was already there.
+    """
+    gitignore = project_root / ".gitignore"
+    entry = f"{AI_DIRNAME}/"
+
+    if gitignore.is_file():
+        content = gitignore.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        if any(line.strip().rstrip("/") == AI_DIRNAME.rstrip("/") for line in lines):
+            return "exists"
+        separator = "\n" if content and not content.endswith("\n") else ""
+        gitignore.write_text(
+            content + separator + f"\n# workitem-conductor\n{entry}\n",
+            encoding="utf-8",
+        )
+        return "added"
+
+    gitignore.write_text(f"# workitem-conductor\n{entry}\n", encoding="utf-8")
+    return "created"
+
+
 @app.command()
 def init() -> None:
     """Initialize the ``.ai/`` skeleton in the current repository."""
@@ -111,7 +243,25 @@ def init() -> None:
     else:
         console.print(f"\n[yellow]{rel}/ already initialized[/yellow] — nothing to do")
 
-    console.print("\nNext: [bold]conductor define \"<your goal>\"[/bold]")
+    gitignore_status = _ensure_ai_in_gitignore(Path.cwd())
+    if gitignore_status == "added":
+        console.print(f"  [green]+[/green] .gitignore ← added [bold]{AI_DIRNAME}/[/bold]")
+    elif gitignore_status == "created":
+        console.print(f"  [green]+[/green] .gitignore (created) ← added [bold]{AI_DIRNAME}/[/bold]")
+
+    from .workspaces import global_defaults_path
+    has_globals = global_defaults_path().is_file()
+    if has_globals:
+        console.print(
+            "\n[dim]Global defaults detected — providers/roles inherited automatically.[/dim]"
+        )
+        console.print("Next: [bold]conductor define \"<your goal>\"[/bold]")
+    else:
+        console.print(
+            "\nNext: [bold]conductor config --global[/bold]  "
+            "[dim](once per machine — sets provider defaults for all repos)[/dim]"
+        )
+        console.print("Then: [bold]conductor define \"<your goal>\"[/bold]")
 
 
 @app.command()
@@ -269,14 +419,21 @@ def refine(
         console.print("")
         return answers
 
+    spinner = _SpinnerGuard()
+
+    def on_round_start(round_no: int) -> None:
+        spinner.start(f"  [cyan]refiner[/cyan] [dim]round {round_no}…[/dim]")
+
     def on_round(round_no: int, kind: str) -> None:
+        elapsed = spinner.stop()
         if kind == "questions":
-            console.print(f"[dim]round {round_no}: refiner is asking questions…[/dim]")
+            console.print(f"[dim]round {round_no}: refiner is asking questions… ({elapsed:.0f}s)[/dim]")
         elif kind == "contract":
-            console.print(f"[dim]round {round_no}: refiner proposed a contract.[/dim]")
+            console.print(f"[dim]round {round_no}: refiner proposed a contract. ({elapsed:.0f}s)[/dim]")
 
     try:
-        outcome = refiner.run(wid, ask=ask, on_round=on_round)
+        with spinner:
+            outcome = refiner.run(wid, ask=ask, on_round=on_round, on_round_start=on_round_start)
     except ProviderConfigError as exc:
         err_console.print(f"[red]Provider configuration error:[/red] {exc}")
         raise typer.Exit(code=1)
@@ -366,16 +523,31 @@ def execute(
     workitem_id: str = typer.Argument(
         None, help="Workitem to execute (defaults to the active one)."
     ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w",
+        help="Execute a cross-project workitem in this workspace."
+    ),
     dry_run: bool = typer.Option(
-        False, "--dry-run", "-n", help="Force dry-run providers regardless of repo.yml."
+        False, "--dry-run", "-n", help="Force dry-run providers regardless of config."
+    ),
+    stream: bool = typer.Option(
+        False, "--stream", "-s",
+        help="Stream provider stdout live instead of showing a spinner. Useful for spotting loops.",
     ),
 ) -> None:
     """Run the workitem flow.
 
-    Each role is executed by the provider bound to it in repo.yml; roles with no
-    binding fall back to dry-run, so an unconfigured repo still runs end-to-end.
-    Use --dry-run to force dry-run everywhere.
+    With ``-w <workspace>``, runs the two-phase workspace flow: planner once
+    (cross-project context), then implementer + reviewer per target project.
+    Without ``-w``, runs the single-repo flow as usual.
+
+    Use ``--stream`` to see provider output in real time — helpful for slow models
+    like Qwen that can loop silently.
     """
+    if workspace:
+        _execute_workspace(workspace, workitem_id, dry_run, stream=stream)
+        return
+
     paths = _load_paths()
     wid = workitem_id or get_active_id(paths)
     if wid is None:
@@ -403,14 +575,39 @@ def execute(
         raise typer.Exit(code=1)
 
     provider_for = build_provider_for(config, dry_run=dry_run)
-    engine = Engine(paths, flow, provider_for=provider_for)
+
+    try:
+        wt_path = create_worktree(paths, wid, source_branch=config.source_branch)
+    except RuntimeError as exc:
+        err_console.print(f"[red]Could not create worktree:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    engine = Engine(paths, flow, provider_for=provider_for, execution_cwd=wt_path)
 
     mode = "[yellow]dry-run[/yellow]" if dry_run else "providers from repo.yml"
     console.print(
-        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan] · {mode}\n"
+        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan] · {mode}"
+    )
+    branch_from = f" · from [bold]{config.source_branch}[/bold]" if config.source_branch else ""
+    console.print(
+        f"  [dim]worktree: .ai/worktrees/{wid} · branch: conductor/{wid}{branch_from}[/dim]\n"
     )
 
+    spinner = _SpinnerGuard(stream=stream)
+
+    def on_step_start(role: str, provider: str = "") -> None:
+        via = f" [dim]({provider})[/dim]" if provider else ""
+        spinner.start(f"  [cyan]{role}[/cyan]{via} [dim]thinking...[/dim]")
+        if stream:
+            console.print(f"  [dim]↓ {role}{' · ' + provider if provider else ''}[/dim]")
+
+    def on_step_output(line: str) -> None:
+        console.print(line, end="", markup=False, highlight=False)
+
     def on_step(step: StepOutcome) -> None:
+        elapsed = spinner.stop()
+        if stream:
+            console.print()  # end of streamed output — move to fresh line
         mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
         rel = step.output_path.relative_to(wi.directory).as_posix()
         extra = ""
@@ -420,33 +617,23 @@ def execute(
             if step.looped_back:
                 extra += " [dim]↩ fixing[/dim]"
         console.print(
-            f"  {mark} {step.role} [dim]({step.stage} · {step.provider})[/dim] → {rel}{extra}"
+            f"  {mark} {step.role} [dim]({step.stage} · {step.provider} · {elapsed:.0f}s)[/dim] → {rel}{extra}"
         )
 
         if step.role == "planner" and step.ok:
             output = step.output_path.read_text(encoding="utf-8")
             m = re.search(r"^BRANCH:\s*(\S+)", output, re.MULTILINE)
             if m:
-                branch = m.group(1).strip()
-                console.print(f"\n  [dim]Suggested branch:[/dim] [bold]{branch}[/bold]")
-                if typer.confirm(f"  Create and switch to '{branch}' now?", default=True):
-                    try:
-                        subprocess.run(
-                            ["git", "checkout", "-b", branch],
-                            cwd=paths.root.parent,
-                            check=True,
-                            capture_output=True,
-                            text=True,
-                        )
-                        console.print(f"  [green]✓[/green] switched to branch '{branch}'")
-                    except subprocess.CalledProcessError as exc:
-                        console.print(
-                            f"  [yellow]![/yellow] could not create branch: "
-                            f"{exc.stderr.strip() or 'already exists?'}"
-                        )
+                console.print(f"\n  [dim]Feature branch:[/dim] [bold]{m.group(1).strip()}[/bold] [dim](created on accept)[/dim]")
 
     try:
-        outcome = engine.run(wid, on_step=on_step)
+        with spinner:
+            outcome = engine.run(
+                wid,
+                on_step=on_step,
+                on_step_start=on_step_start,
+                on_step_output=on_step_output if stream else None,
+            )
     except GoalNotApproved as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
@@ -465,14 +652,149 @@ def execute(
         raise typer.Exit(code=1)
 
 
+def _execute_workspace(
+    workspace: str, workitem_id: str | None, dry_run: bool, stream: bool = False
+) -> None:
+    """Execute a workspace workitem across its target projects."""
+    ws_paths = _load_ws_paths(workspace)
+    wid = workitem_id or get_active_id(ws_paths)
+    if wid is None:
+        err_console.print(
+            "[red]No workitem to execute.[/red]  "
+            f"Run `conductor define -w {workspace} \"<goal>\"` first."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(ws_paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    if not wi.goal.target_projects:
+        err_console.print(
+            "[red]No target_projects set.[/red]  "
+            f"Run `conductor refine -w {workspace}` or edit goal.yml to add them."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        config = load_workspace_config(ws_paths)
+    except RepoConfigError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        ws_flow = load_flow(ws_paths, "workspace-change")
+    except FlowNotFound:
+        err_console.print(
+            "[red]Flow 'workspace-change' not found.[/red]  "
+            "Re-run `conductor workspace add` to scaffold the workspace."
+        )
+        raise typer.Exit(code=1)
+
+    provider_for = build_provider_for(config, dry_run=dry_run)
+    engine = WorkspaceEngine(
+        ws_paths,
+        provider_for,
+        max_fix_iterations=ws_flow.max_fix_iterations,
+        source_branch=config.source_branch,
+    )
+
+    mode = "[yellow]dry-run[/yellow]" if dry_run else "providers from workspace config"
+    projects_str = ", ".join(wi.goal.target_projects)
+    console.print(
+        f"Executing [bold]{wid}[/bold] · workspace [cyan]{workspace}[/cyan] · {mode}"
+    )
+    console.print(f"  projects: [dim]{projects_str}[/dim]\n")
+
+    spinner = _SpinnerGuard(stream=stream)
+
+    def on_planner_start(provider: str = "") -> None:
+        via = f" · {provider}" if provider else ""
+        spinner.start(f"  [cyan]planner[/cyan] [dim](workspace-level{via})[/dim]")
+        if stream:
+            console.print(f"  [dim]↓ planner{' · ' + provider if provider else ''}[/dim]")
+
+    def on_planner(ok: bool, error: str, provider: str = "") -> None:
+        elapsed = spinner.stop()
+        if stream:
+            console.print()
+        if ok:
+            via = f" · {provider}" if provider else ""
+            console.print(f"  [green]✓[/green] planner [dim](workspace-level{via} · {elapsed:.0f}s)[/dim]")
+        else:
+            console.print(f"  [red]✗[/red] planner — {error}")
+
+    def on_project_step_start(project_name: str, role: str, provider: str = "") -> None:
+        via = f" [dim]({provider})[/dim]" if provider else ""
+        spinner.start(f"  [bold]{project_name}[/bold] · [cyan]{role}[/cyan]{via} [dim]thinking...[/dim]")
+        if stream:
+            console.print(f"  [dim]↓ {project_name} · {role}{' · ' + provider if provider else ''}[/dim]")
+
+    def on_project_step(step: ProjectStepOutcome) -> None:
+        elapsed = spinner.stop()
+        if stream:
+            console.print()
+        mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
+        extra = ""
+        if step.verdict and step.verdict != "unknown":
+            color = "green" if step.verdict == "approved" else "yellow"
+            extra = f" [{color}]{step.verdict}[/{color}]"
+            if step.looped_back:
+                extra += " [dim]↩ fixing[/dim]"
+        via = f" · {step.provider}" if step.provider else ""
+        console.print(
+            f"  {mark} [bold]{step.project_name}[/bold] · {step.role} [dim]({elapsed:.0f}s{via})[/dim]{extra}"
+        )
+
+    def on_output(line: str) -> None:
+        console.print(line, end="", markup=False, highlight=False)
+
+    try:
+        with spinner:
+            outcome = engine.run(
+                wid,
+                on_planner=on_planner,
+                on_planner_start=on_planner_start,
+                on_project_step=on_project_step,
+                on_project_step_start=on_project_step_start,
+                on_planner_output=on_output if stream else None,
+                on_project_output=on_output if stream else None,
+            )
+    except ValueError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    except GoalNotApproved as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    except ProviderConfigError as exc:
+        err_console.print(f"[red]Provider configuration error:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    if outcome.completed:
+        console.print(
+            f"\n[green]All projects done.[/green]  "
+            f"Review the diffs, then run "
+            f"[bold]conductor accept -w {workspace}[/bold]."
+        )
+    else:
+        console.print(f"\n[yellow]Stopped:[/yellow] {outcome.stopped_reason}")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def reopen(
     reason: str = typer.Argument(..., help="Why you're reopening — the planner receives this as directed context."),
     workitem_id: str = typer.Option(
         None, "--id", help="Workitem to reopen (defaults to the active one)."
     ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w",
+        help="Reopen a cross-project workitem in this workspace."
+    ),
     from_role: str = typer.Option(
-        None, "--from", help="Restart from this role's step (default: start of flow)."
+        None, "--from", help="Restart from this role's step (single-repo only)."
     ),
 ) -> None:
     """Reopen a completed or blocked workitem with a directed reason.
@@ -480,8 +802,12 @@ def reopen(
     Resets the execution state and writes a ``reopen.md`` so the planner
     treats the rerun as a directed revision of the prior plan, not a fresh
     start. Use ``--from <role>`` to restart from a specific step instead of
-    the beginning of the flow.
+    the beginning of the flow (single-repo only).
     """
+    if workspace:
+        _reopen_workspace(workspace, workitem_id, reason)
+        return
+
     paths = _load_paths()
     wid = workitem_id or get_active_id(paths)
     if wid is None:
@@ -513,6 +839,21 @@ def reopen(
             raise typer.Exit(code=1)
         step_index = idx
 
+    wt_path = worktree_path(paths, wid)
+    if wt_path.is_dir():
+        if step_index == 0:
+            # Restarting from scratch — discard worktree work but keep feature branch.
+            remove_worktree(paths, wid, delete_branch=True)
+            console.print(
+                f"  [dim]worktree removed · branch conductor/{wid} deleted[/dim]"
+            )
+        else:
+            # Restarting from a later step (e.g. --from reviewer) — the
+            # implementer's work in the worktree is still valid, keep it.
+            console.print(
+                f"  [dim]worktree preserved at .ai/worktrees/{wid}[/dim]"
+            )
+
     updated = reopen_workitem(paths, wid, reason, step_index=step_index)
     console.print(f"[green]Reopened[/green] [bold]{updated.workitem_id}[/bold]")
     console.print(f"  reason: {reason}")
@@ -526,13 +867,61 @@ def reopen(
     console.print("\nNext: [bold]conductor execute[/bold]")
 
 
+def _reopen_workspace(workspace: str, workitem_id: str | None, reason: str) -> None:
+    """Reopen a workspace workitem, cleaning up per-project worktrees."""
+    ws_paths = _load_ws_paths(workspace)
+    wid = workitem_id or get_active_id(ws_paths)
+    if wid is None:
+        err_console.print(
+            "[red]No workitem to reopen.[/red]  "
+            f"Run `conductor status -w {workspace} --all` to list workitems."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(ws_paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    feature_branch = wi.state.feature_branch
+    # Remove each target project's worktree (changes not yet committed are lost).
+    for project_name in wi.goal.target_projects:
+        project_root = next(
+            (p for p in ws_paths.project_roots if p.name == project_name), None
+        )
+        if project_root is None:
+            continue
+        project_paths = AiPaths(root=project_root / ".ai")
+        wt_path = worktree_path(project_paths, wid)
+        if wt_path.is_dir():
+            remove_worktree(project_paths, wid, delete_branch=True)
+            console.print(
+                f"  [dim]{project_name}: worktree removed · branch conductor/{wid} deleted[/dim]"
+            )
+
+    updated = reopen_workitem(ws_paths, wid, reason)
+    console.print(f"[green]Reopened[/green] [bold]{updated.workitem_id}[/bold]")
+    console.print(f"  reason: {reason}")
+    console.print(
+        f"  state: stage=[cyan]{updated.state.stage}[/cyan] "
+        f"status=[yellow]{updated.state.status}[/yellow] "
+        f"next=[bold]{updated.state.next_action}[/bold]"
+    )
+    console.print(f"\nNext: [bold]conductor execute -w {workspace}[/bold]")
+
+
 @app.command()
 def accept(
     workitem_id: str = typer.Option(
         None, "--id", help="Workitem to accept (defaults to the active one)."
     ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w",
+        help="Accept a cross-project workspace workitem (commits + merges all target projects)."
+    ),
     push: bool = typer.Option(
-        False, "--push", help="Push to the remote tracking branch after committing."
+        False, "--push", help="Push each project branch after merging."
     ),
     message: str = typer.Option(
         None, "--message", "-m", help="Override the commit message (default: derived from goal title)."
@@ -540,12 +929,16 @@ def accept(
 ) -> None:
     """Commit the working tree changes for the active workitem.
 
-    Stages all changes (``git add -A``) and commits with a message derived from
-    the goal title. Use ``--message`` to override. Use ``--push`` to push to the
-    remote tracking branch immediately after.
+    With ``-w <workspace>``, commits and merges the worktree for every project
+    that was part of the workspace execute. Without ``-w``, commits the single-repo
+    worktree as usual.
 
-    You remain in control: review the diff before running this.
+    You remain in control: review the diffs before running this.
     """
+    if workspace:
+        _accept_workspace(workspace, workitem_id, message, push)
+        return
+
     paths = _load_paths()
     wid = workitem_id or get_active_id(paths)
     if wid is None:
@@ -560,35 +953,87 @@ def accept(
         err_console.print(f"[red]Workitem not found:[/red] {wid}")
         raise typer.Exit(code=1)
 
-    commit_msg = message or wi.state.title
+    try:
+        config = load_repo_config(paths)
+    except RepoConfigError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    feature_branch = wi.state.feature_branch
+    commit_msg = message or _build_commit_msg(wi.state.title, feature_branch, wid)
+    merge_msg = (
+        f"Merge {feature_branch} into {config.target_branch or 'HEAD'}"
+        if feature_branch
+        else commit_msg
+    )
     repo_root = paths.root.parent
+    wt_path = worktree_path(paths, wid)
 
-    # Stage everything
-    stage = subprocess.run(
-        ["git", "add", "-A"], cwd=repo_root, capture_output=True, text=True
-    )
-    if stage.returncode != 0:
-        err_console.print(f"[red]git add failed:[/red] {stage.stderr.strip()}")
-        raise typer.Exit(code=1)
+    if wt_path.is_dir():
+        # Worktree path: commit in the isolated branch, then merge into target.
+        try:
+            committed = commit_worktree(paths, wid, commit_msg)
+        except RuntimeError as exc:
+            err_console.print(f"[red]git commit in worktree failed:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
 
-    # Verify there is something to commit
-    diff_check = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"], cwd=repo_root
-    )
-    if diff_check.returncode == 0:
-        console.print("[yellow]Nothing to commit[/yellow] — working tree is clean.")
-        raise typer.Exit(code=0)
+        if not committed:
+            console.print("[yellow]Nothing to commit[/yellow] — worktree is clean.")
+            raise typer.Exit(code=0)
 
-    commit = subprocess.run(
-        ["git", "commit", "-m", commit_msg],
-        cwd=repo_root, capture_output=True, text=True,
-    )
-    if commit.returncode != 0:
-        err_console.print(f"[red]git commit failed:[/red] {commit.stderr.strip()}")
-        raise typer.Exit(code=1)
+        try:
+            merge_worktree(paths, wid, merge_msg, target_branch=config.target_branch)
+        except RuntimeError as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            err_console.print(
+                "[dim]Resolve conflicts manually, then run `git merge --continue`.[/dim]"
+            )
+            raise typer.Exit(code=1) from exc
 
-    console.print(f"[green]Committed[/green] [bold]{wid}[/bold]")
-    console.print(f"  message: {commit_msg}")
+        # Create feature branch at the committed tip (before worktree dir is removed).
+        if feature_branch:
+            subprocess.run(
+                ["git", "branch", "-f", feature_branch, worktree_branch(wid)],
+                cwd=repo_root, capture_output=True, text=True,
+            )
+
+        remove_worktree(paths, wid)
+        console.print(f"[green]Accepted[/green] [bold]{wid}[/bold]")
+        console.print(f"  commit: {commit_msg.splitlines()[0]}")
+        merged_into = config.target_branch or "current branch"
+        if feature_branch:
+            console.print(f"  [dim]{feature_branch} → {merged_into} · worktree removed[/dim]")
+            console.print(f"  [dim]PR ready: [bold]{feature_branch}[/bold] → main[/dim]")
+        else:
+            console.print(
+                f"  [dim]branch conductor/{wid} merged into {merged_into} · worktree removed[/dim]"
+            )
+    else:
+        # Legacy path: no worktree, commit directly in the working tree.
+        stage = subprocess.run(
+            ["git", "add", "-A"], cwd=repo_root, capture_output=True, text=True
+        )
+        if stage.returncode != 0:
+            err_console.print(f"[red]git add failed:[/red] {stage.stderr.strip()}")
+            raise typer.Exit(code=1)
+
+        diff_check = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"], cwd=repo_root
+        )
+        if diff_check.returncode == 0:
+            console.print("[yellow]Nothing to commit[/yellow] — working tree is clean.")
+            raise typer.Exit(code=0)
+
+        commit = subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            cwd=repo_root, capture_output=True, text=True,
+        )
+        if commit.returncode != 0:
+            err_console.print(f"[red]git commit failed:[/red] {commit.stderr.strip()}")
+            raise typer.Exit(code=1)
+
+        console.print(f"[green]Committed[/green] [bold]{wid}[/bold]")
+        console.print(f"  message: {commit_msg}")
 
     if push:
         push_result = subprocess.run(
@@ -598,6 +1043,280 @@ def accept(
             err_console.print(f"[red]git push failed:[/red] {push_result.stderr.strip()}")
             raise typer.Exit(code=1)
         console.print("[green]Pushed.[/green]")
+        if feature_branch:
+            fp_result = subprocess.run(
+                ["git", "push", "-u", "origin", feature_branch],
+                cwd=repo_root, capture_output=True, text=True,
+            )
+            if fp_result.returncode == 0:
+                console.print(f"[green]Pushed[/green] {feature_branch}")
+            else:
+                console.print(f"  [yellow]![/yellow] could not push {feature_branch}: {fp_result.stderr.strip()}")
+
+
+# ---------------------------------------------------------------------------
+# Known provider CLIs and their typical defaults
+# ---------------------------------------------------------------------------
+_CLI_DEFAULTS: dict[str, dict] = {
+    "claude":    {"type": "cli_one_shot", "command": "claude", "args": ["-p"], "prompt_via": "arg", "timeout": 3600},
+    "opencode":  {"type": "cli_one_shot", "command": "opencode", "args": ["run"], "prompt_via": "arg", "timeout": 3600},
+    "qwen":      {"type": "cli_one_shot", "command": "qwen", "args": ["--approval-mode", "yolo"], "prompt_via": "arg", "timeout": 3600},
+    "codex":     {"type": "cli_one_shot", "command": "codex", "args": [], "prompt_via": "stdin", "timeout": 3600},
+}
+_KNOWN_ROLES = ("refiner", "planner", "implementer", "reviewer", "validator")
+
+
+def _detect_available_clis() -> list[str]:
+    return [name for name in _CLI_DEFAULTS if shutil.which(name)]
+
+
+def _prompt_provider_name(role: str, current: str | None, available: list[str]) -> str | None:
+    """Ask which CLI to use for a role. Returns provider key (CLI name) or None to skip."""
+    choices = available + ["skip"]
+    current_label = f" [dim](current: {current})[/dim]" if current else ""
+    console.print(f"\n  [bold]{role}[/bold]{current_label}")
+    for i, c in enumerate(choices, 1):
+        mark = " ← current" if c == current else ""
+        console.print(f"    {i}. {c}{mark}")
+    raw = typer.prompt(f"  Choose (1-{len(choices)})", default="1")
+    try:
+        idx = int(raw) - 1
+        chosen = choices[idx]
+    except (ValueError, IndexError):
+        chosen = choices[0]
+    return None if chosen == "skip" else chosen
+
+
+def _write_repo_yml(paths: AiPaths, config) -> None:
+    """Overwrite repo.yml with the current config (preserving name + flow)."""
+    import yaml as _yaml
+    existing_raw = {}
+    if paths.repo_config.is_file():
+        existing_raw = _yaml.safe_load(paths.repo_config.read_text(encoding="utf-8")) or {}
+
+    data = {
+        "name": existing_raw.get("name", paths.cwd.name),
+        "default_flow": existing_raw.get("default_flow", "simple-change"),
+        "providers": {n: _provider_to_dict(p) for n, p in config.providers.items()},
+        "roles": {r: {"provider": rb.provider} for r, rb in config.roles.items()},
+    }
+    if "refine" in existing_raw:
+        data["refine"] = existing_raw["refine"]
+
+    paths.repo_config.write_text(
+        "# workitem-conductor repo configuration\n"
+        + _yaml.dump(data, sort_keys=False, allow_unicode=True, default_flow_style=False),
+        encoding="utf-8",
+    )
+
+
+@app.command(name="config")
+def config_cmd(
+    global_: bool = typer.Option(
+        False, "--global", "-g",
+        help="Configure global defaults (~/.config/conductor/defaults.yml) instead of this repo."
+    ),
+) -> None:
+    """Interactively configure provider/role bindings for this repo (or globally).
+
+    Walks through each role and lets you assign a CLI provider. Global defaults
+    (``--global``) are inherited by every repo that doesn't override them locally.
+    """
+    available = _detect_available_clis()
+    if not available:
+        err_console.print(
+            "[red]No known provider CLIs found on PATH.[/red]  "
+            "Install at least one of: " + ", ".join(_CLI_DEFAULTS)
+        )
+        raise typer.Exit(code=1)
+
+    if global_:
+        _config_global(available)
+    else:
+        _config_repo(available)
+
+
+def _config_global(available: list[str]) -> None:
+    """Wizard for global defaults."""
+    current = load_global_defaults()
+
+    console.print(
+        f"\n[bold]Global defaults[/bold]  "
+        f"[dim](~/.config/conductor/defaults.yml)[/dim]\n"
+        f"Inherited by every repo unless overridden locally.\n"
+    )
+    console.print(f"Available CLIs: " + "  ".join(f"[green]{c}[/green]" for c in available))
+
+    new_providers: dict[str, ProviderConfig] = {}
+    new_roles: dict[str, RoleBinding] = {}
+
+    for role in _KNOWN_ROLES:
+        current_provider = current.roles.get(role)
+        current_cli = current_provider.provider if current_provider else None
+        chosen = _prompt_provider_name(role, current_cli, available)
+        if chosen is None:
+            if current_provider:
+                new_roles[role] = current_provider
+                if current_cli and current_cli in current.providers:
+                    new_providers[current_cli] = current.providers[current_cli]
+            continue
+        defaults = _CLI_DEFAULTS[chosen]
+        new_providers[chosen] = ProviderConfig.model_validate(defaults)
+        new_roles[role] = RoleBinding(provider=chosen)
+
+    if not new_roles:
+        console.print("\n[yellow]No roles configured — nothing written.[/yellow]")
+        return
+
+    save_global_defaults(RepoConfig(providers=new_providers, roles=new_roles))
+    console.print(
+        f"\n[green]Global defaults saved.[/green]  "
+        f"[dim]~/.config/conductor/defaults.yml[/dim]"
+    )
+    console.print("New repos will inherit these settings automatically.")
+
+
+def _config_repo(available: list[str]) -> None:
+    """Wizard for the current repo's .ai/repo.yml."""
+    paths = _load_paths()
+    # Load merged config (defaults + local) so we show the effective current state
+    try:
+        effective = load_repo_config(paths)
+    except RepoConfigError:
+        effective = load_global_defaults()
+
+    console.print(
+        f"\n[bold]Repo config[/bold]  [dim]({paths.repo_config})[/dim]\n"
+        "Local settings override global defaults for this repo only.\n"
+    )
+    console.print(f"Available CLIs: " + "  ".join(f"[green]{c}[/green]" for c in available))
+
+    new_providers: dict[str, ProviderConfig] = {}
+    new_roles: dict[str, RoleBinding] = {}
+
+    for role in _KNOWN_ROLES:
+        current_provider = effective.roles.get(role)
+        current_cli = current_provider.provider if current_provider else None
+        chosen = _prompt_provider_name(role, current_cli, available)
+        if chosen is None:
+            continue
+        defaults = _CLI_DEFAULTS[chosen]
+        new_providers[chosen] = ProviderConfig.model_validate(defaults)
+        new_roles[role] = RoleBinding(provider=chosen)
+
+    if not new_roles:
+        console.print("\n[yellow]No roles configured — repo.yml unchanged.[/yellow]")
+        return
+
+    _write_repo_yml(paths, RepoConfig(providers=new_providers, roles=new_roles))
+    console.print(
+        f"\n[green]Saved.[/green]  [dim]{paths.repo_config}[/dim]\n"
+        "Run [bold]conductor doctor[/bold] to verify bindings."
+    )
+
+
+def _accept_workspace(
+    workspace: str, workitem_id: str | None, message: str | None, push: bool
+) -> None:
+    """Commit + merge worktrees for all target projects of a workspace workitem."""
+    ws_paths = _load_ws_paths(workspace)
+    wid = workitem_id or get_active_id(ws_paths)
+    if wid is None:
+        err_console.print(
+            "[red]No active workspace workitem.[/red]  Pass --id or run `conductor status -w`."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(ws_paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    try:
+        config = load_workspace_config(ws_paths)
+    except RepoConfigError as exc:
+        err_console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    feature_branch = wi.state.feature_branch
+    commit_msg = message or _build_commit_msg(wi.state.title, feature_branch, wid)
+    merge_msg = (
+        f"Merge {feature_branch} into {config.target_branch or 'HEAD'}"
+        if feature_branch
+        else commit_msg
+    )
+    any_accepted = False
+
+    for project_name in wi.goal.target_projects:
+        project_root = next(
+            (p for p in ws_paths.project_roots if p.name == project_name), None
+        )
+        if project_root is None:
+            console.print(f"  [yellow]![/yellow] {project_name}: not found in workspace, skipping")
+            continue
+
+        project_paths = AiPaths(root=project_root / ".ai")
+        wt_path = worktree_path(project_paths, wid)
+
+        if not wt_path.is_dir():
+            console.print(f"  [dim]= {project_name}: no worktree, skipping[/dim]")
+            continue
+
+        try:
+            committed = commit_worktree(project_paths, wid, commit_msg)
+        except RuntimeError as exc:
+            err_console.print(f"  [red]✗[/red] {project_name}: commit failed — {exc}")
+            raise typer.Exit(code=1) from exc
+
+        if not committed:
+            console.print(f"  [dim]= {project_name}: nothing to commit[/dim]")
+            remove_worktree(project_paths, wid)
+            continue
+
+        try:
+            merge_worktree(project_paths, wid, merge_msg, target_branch=config.target_branch)
+        except RuntimeError as exc:
+            err_console.print(f"  [red]✗[/red] {project_name}: merge failed — {exc}")
+            err_console.print("[dim]Resolve conflicts manually, then run `git merge --continue`.[/dim]")
+            raise typer.Exit(code=1) from exc
+
+        if feature_branch:
+            subprocess.run(
+                ["git", "branch", "-f", feature_branch, worktree_branch(wid)],
+                cwd=project_root, capture_output=True, text=True,
+            )
+
+        remove_worktree(project_paths, wid)
+        merged_into = config.target_branch or "current branch"
+        console.print(f"  [green]✓[/green] {project_name}: merged into {merged_into} · worktree removed")
+        any_accepted = True
+
+        if push:
+            push_result = subprocess.run(
+                ["git", "push"], cwd=project_root, capture_output=True, text=True
+            )
+            if push_result.returncode != 0:
+                err_console.print(
+                    f"  [red]✗[/red] {project_name}: push failed — {push_result.stderr.strip()}"
+                )
+                raise typer.Exit(code=1)
+            console.print(f"  [green]✓[/green] {project_name}: pushed")
+            if feature_branch:
+                fp_result = subprocess.run(
+                    ["git", "push", "-u", "origin", feature_branch],
+                    cwd=project_root, capture_output=True, text=True,
+                )
+                if fp_result.returncode == 0:
+                    console.print(f"  [green]✓[/green] {project_name}: pushed {feature_branch}")
+
+    if any_accepted:
+        console.print(f"\n[green]Accepted[/green] [bold]{wid}[/bold]")
+        console.print(f"  commit: {commit_msg.splitlines()[0]}")
+        if feature_branch:
+            console.print(f"  [dim]PR ready: [bold]{feature_branch}[/bold] → main[/dim]")
+    else:
+        console.print(f"[yellow]Nothing to accept[/yellow] for {wid} — all worktrees were clean.")
 
 
 @app.command()

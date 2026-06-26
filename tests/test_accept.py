@@ -70,7 +70,8 @@ def test_accept_commits_with_goal_title(approved_workitem, monkeypatch):
 
     assert result.exit_code == 0
     assert "Committed" in result.output
-    assert committed_msgs == ["fix the null check in validator"]
+    assert committed_msgs[0].startswith("fix the null check in validator")
+    assert "Workitem:" in committed_msgs[0]
 
 
 def test_accept_custom_message(approved_workitem, monkeypatch):

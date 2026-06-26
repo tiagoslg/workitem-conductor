@@ -12,7 +12,8 @@ underlying CLI (Codex, Claude, …) is already logged in on the machine.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -24,6 +25,8 @@ class ProviderRequest:
     prompt: str
     workitem_id: str
     cwd: Path
+    # When set, called once per stdout line while the process runs (streaming mode).
+    on_output: Callable[[str], None] | None = field(default=None, compare=False)
 
 
 @dataclass

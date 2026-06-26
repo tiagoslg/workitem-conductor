@@ -42,6 +42,7 @@ _CONTRACT_FIELDS = (
     "constraints",
     "validation",
     "stop_conditions",
+    "target_projects",
 )
 
 # Markers are matched leniently: smaller models often wrap them in markdown
@@ -83,6 +84,7 @@ def _preprocess_yaml(text: str) -> str | None:
             needs_quoting = (
                 re.search(r'[{|}]', value)    # flow indicators
                 or re.search(r'\S:\s', value)  # colon-space mid-sentence
+                or re.search(r'\S:$', value)   # trailing colon → YAML mapping key
             )
             if needs_quoting and not (value.startswith('"') or value.startswith("'")):
                 line = m.group(1) + '"' + value.replace('"', '\\"') + '"'
@@ -116,7 +118,12 @@ def _extract_contract_yaml(after: str) -> dict | None:
     runs a preprocessing pass that quotes offending values and retries.
     """
     fence = _FENCE_RE.search(after)
-    raw = fence.group(1) if fence else after
+    if fence:
+        raw = fence.group(1)
+    else:
+        # CONTRACT: may have been inside a code fence (the closing ``` appears
+        # at the end of ``after``). Strip it so yaml.safe_load sees clean YAML.
+        raw = re.split(r'(?m)^```\s*$', after)[0]
 
     try:
         data = yaml.safe_load(raw)
@@ -137,8 +144,39 @@ def _extract_contract_yaml(after: str) -> dict | None:
     return None
 
 
+# Bold Q-header: **Q1 — title**, **1 — title**, **Q1: title**, etc.
+_BOLD_Q_RE = re.compile(r'^\*\*[Qq]?\d+')
+
+
 def _extract_questions(after: str) -> list[str]:
-    """Collect the question lines following ``QUESTIONS:`` (list markers stripped)."""
+    """Collect question items following ``QUESTIONS:``.
+
+    Handles two formats:
+    - Bold Q-headers: ``**Q1 — title?**`` paragraphs optionally followed by
+      explanation text. A preamble paragraph before the first Q-header is
+      skipped. Each header (plus any explanation paragraphs before the next
+      header) becomes one question entry.
+    - Plain list: consecutive ``- item`` / ``1. item`` lines (legacy format).
+    """
+    # First pass: bold Q-header format used by larger models.
+    paragraphs = [p.strip() for p in re.split(r'\n{2,}', after.strip()) if p.strip()]
+    groups: list[str] = []
+    current: list[str] = []
+    for para in paragraphs:
+        first_line = para.splitlines()[0]
+        if _BOLD_Q_RE.match(first_line):
+            if current:
+                groups.append('\n\n'.join(current))
+            current = [para]
+        elif current:
+            current.append(para)
+        # else: preamble before first Q-header — skip
+    if current:
+        groups.append('\n\n'.join(current))
+    if groups:
+        return groups
+
+    # Second pass: plain list items (original behaviour).
     questions: list[str] = []
     for line in after.splitlines():
         stripped = line.strip()
@@ -157,14 +195,22 @@ def _infer_contract(text: str) -> dict | None:
 
     Lets a model that wrote the YAML without the literal ``CONTRACT:`` marker
     still be understood, without misreading an unrelated code block.
+    Also handles the case where ``CONTRACT:`` is the first line inside a code
+    fence, making the parsed dict ``{"CONTRACT": {...}}``.
     """
     for fence in _FENCE_RE.finditer(text):
         try:
             data = yaml.safe_load(fence.group(1))
         except yaml.YAMLError:
             continue
-        if isinstance(data, dict) and (_CONTRACT_KEYS & set(data)):
+        if not isinstance(data, dict):
+            continue
+        if _CONTRACT_KEYS & set(data):
             return data
+        # CONTRACT: used as a YAML wrapper key inside the code fence.
+        inner = data.get("CONTRACT")
+        if isinstance(inner, dict) and (_CONTRACT_KEYS & set(inner)):
+            return inner
     return None
 
 
@@ -302,6 +348,7 @@ class Refiner:
         *,
         ask: AnswerFn,
         on_round: Callable[[int, str], None] | None = None,
+        on_round_start: Callable[[int], None] | None = None,
     ) -> RefineOutcome:
         wi = load_workitem(self.paths, workitem_id)
         outcome = RefineOutcome(workitem_id=workitem_id)
@@ -317,6 +364,8 @@ class Refiner:
                 "\n\n".join(transcript_parts),
                 workspace_info=self.workspace_info,
             )
+            if on_round_start:
+                on_round_start(outcome.rounds)
             result = provider.run(
                 ProviderRequest(
                     role="refiner",

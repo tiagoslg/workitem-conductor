@@ -48,3 +48,5 @@ class RepoConfig(BaseModel):
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     roles: dict[str, RoleBinding] = Field(default_factory=dict)
     refine: RefineConfig = Field(default_factory=RefineConfig)
+    source_branch: str | None = None
+    target_branch: str | None = None

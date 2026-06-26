@@ -9,6 +9,7 @@ loop) until the reviewer approves or a stop condition is hit.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,15 +61,24 @@ class RunOutcome:
 
 
 class Engine:
-    def __init__(self, paths: AiPaths, flow: Flow, provider_for: ProviderFor) -> None:
+    def __init__(
+        self,
+        paths: AiPaths,
+        flow: Flow,
+        provider_for: ProviderFor,
+        execution_cwd: Path | None = None,
+    ) -> None:
         self.paths = paths
         self.flow = flow
         self.provider_for = provider_for
+        self._execution_cwd = execution_cwd or paths.cwd
 
     def run(
         self,
         workitem_id: str,
         on_step: Callable[[StepOutcome], None] | None = None,
+        on_step_start: Callable[[str, str], None] | None = None,
+        on_step_output: Callable[[str], None] | None = None,
     ) -> RunOutcome:
         wi = load_workitem(self.paths, workitem_id)
         if not wi.goal.approved:
@@ -94,18 +104,20 @@ class Engine:
             provider = self.provider_for(step.role)
 
             prompt = build_context(self.paths, wi, step.role)
+            prompt_path = outputs_dir / f"{seq:02d}-{step.role}.prompt.md"
+            output_path = outputs_dir / f"{seq:02d}-{step.role}.output.md"
+            prompt_path.write_text(prompt, encoding="utf-8")
+            if on_step_start:
+                on_step_start(step.role, provider.name)
             result = provider.run(
                 ProviderRequest(
                     role=step.role,
                     prompt=prompt,
                     workitem_id=workitem_id,
-                    cwd=self.paths.root.parent,
+                    cwd=self._execution_cwd,
+                    on_output=on_step_output,
                 )
             )
-
-            prompt_path = outputs_dir / f"{seq:02d}-{step.role}.prompt.md"
-            output_path = outputs_dir / f"{seq:02d}-{step.role}.output.md"
-            prompt_path.write_text(prompt, encoding="utf-8")
             output_path.write_text(result.output, encoding="utf-8")
 
             step_outcome = StepOutcome(
@@ -155,6 +167,11 @@ class Engine:
                     if on_step:
                         on_step(step_outcome)
                     continue
+
+            if step.role == "planner" and result.ok:
+                m = re.search(r"^BRANCH:\s*(\S+)", result.output, re.MULTILINE)
+                if m:
+                    state.feature_branch = m.group(1).strip()
 
             state.step_index += 1
             state.record(f"{step.role} completed via {result.provider}")

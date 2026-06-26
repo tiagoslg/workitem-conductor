@@ -68,6 +68,13 @@ class AiPaths:
     def workitem_dir(self, workitem_id: str) -> Path:
         return self.workitems_dir / workitem_id
 
+    @property
+    def worktrees_dir(self) -> Path:
+        return self.root / "worktrees"
+
+    def worktree_dir(self, workitem_id: str) -> Path:
+        return self.worktrees_dir / workitem_id
+
 
 def find_ai_root(start: Path | None = None) -> Path | None:
     """Return the nearest ``.ai/`` directory at or above ``start``.
@@ -127,6 +134,10 @@ class WorkspacePaths:
 
     def workitem_dir(self, workitem_id: str) -> Path:
         return self.workitems_dir / workitem_id
+
+    @property
+    def flows_dir(self) -> Path:
+        return self.root / "flows"
 
     @property
     def cwd(self) -> Path:

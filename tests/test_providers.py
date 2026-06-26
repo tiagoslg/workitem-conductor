@@ -33,7 +33,8 @@ def paths(tmp_path: Path) -> AiPaths:
 
 # --- config loader -------------------------------------------------------
 
-def test_load_repo_config_defaults_when_absent(tmp_path: Path):
+def test_load_repo_config_defaults_when_absent(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("CONDUCTOR_CONFIG_HOME", str(tmp_path / "conductor_home"))
     paths = AiPaths(root=tmp_path / ".ai")
     (tmp_path / ".ai").mkdir()
     config = load_repo_config(paths)
