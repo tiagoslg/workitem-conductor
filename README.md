@@ -17,7 +17,6 @@ between and stops to ask you only when it's blocked or done.
 | term | meaning |
 | --- | --- |
 | **workitem** | unit of intent, state, evidence and final report |
-| **session** | execution/sandbox environment for a workitem *(future)* |
 | **flow** | ordered process, e.g. plan → implement → review → fix → validate |
 | **role** | a responsibility in a flow: planner, implementer, reviewer, … |
 | **provider** | an execution backend: Codex CLI, Claude CLI, Ollama, an API model |
@@ -28,7 +27,14 @@ and another model tomorrow without changing the flow.
 ## Install
 
 ```bash
-pip install -e ".[dev]"   # from this repo, for development
+pip install -e ".[dev]"   # from this repo, in a virtualenv
+```
+
+Or install globally with [pipx](https://pipx.pypa.io/) so `conductor` is on
+your PATH without activating a virtualenv:
+
+```bash
+pipx install -e /path/to/workitem-conductor
 ```
 
 This puts the `conductor` command on your PATH.
@@ -39,14 +45,16 @@ Run from inside the repository you want to work on:
 
 ```bash
 cd ~/projects/my-service
-conductor init                 # scaffold .ai/ (config, flow, role prompts)
+conductor init                      # scaffold .ai/ (config, flow, role prompts)
 conductor define "fix the policy discovery bug"
-conductor refine               # optional: AI proposes scope/criteria, asking if needed
+conductor refine                    # optional: AI proposes scope/criteria, asking if needed
 #   edit .ai/workitems/<id>/goal.yml — scope, acceptance criteria, stop conditions
-conductor approve              # mark the goal approved & ready to execute
-conductor status               # show the active workitem
-conductor execute              # run the flow end-to-end (dry-run providers for now)
-conductor doctor               # check prerequisites and provider CLIs
+conductor approve                   # mark the goal approved & ready to execute
+conductor status                    # show the active workitem
+conductor execute                   # run the flow end-to-end
+conductor execute --stream          # same, but stream provider output live
+conductor accept                    # commit the result; see "Git workflow" below
+conductor doctor                    # check prerequisites and provider CLIs
 ```
 
 ## Refining the goal with AI
@@ -87,6 +95,7 @@ Versionable configuration is separated from runtime artifacts:
   .gitignore               # ignores the runtime dirs below
 
   workitems/<id>/          # runtime: goal.yml, state.yml, outputs/, reviews/
+  worktrees/<id>/          # git worktree checkout (active during execute)
   active_workitem.txt      # pointer to the active workitem
 ```
 
@@ -106,7 +115,7 @@ providers:
   qwen_api:   { type: api, base_url: https://api.example.com/v1, model: qwen2.5-coder, api_key_env: QWEN_API_KEY }
 roles:
   planner:     { provider: codex_cli }
-  implementer: { provider: codex_cli }
+  implementer: { provider: qwen_cli }
   reviewer:    { provider: claude_cli }
   refiner:     { provider: qwen_api }
 ```
@@ -139,36 +148,157 @@ up with the model pulled (for `ollama`). The conductor never logs in for you —
 CLIs must already be authenticated and API keys must be exported in your
 environment.
 
-## Watching work across projects
+## Git workflow
 
-Each repo keeps its own `.ai/`, so by default you only see a workitem from inside
-its repo. To see work across several projects at once, register their roots in a
-global **workspace registry** and open the read-only dashboard:
+`conductor execute` creates an isolated **git worktree** at
+`.ai/worktrees/<id>/` on a branch called `conductor/<id>`. All agent edits
+happen inside that worktree and never touch your working tree.
+
+When you're happy with the result, `conductor accept` brings the changes in:
+
+```bash
+conductor accept          # commit + merge worktree, remove it
+conductor accept --push   # same, then push the feature branch
+```
+
+Accept does, in order:
+1. `git add -A && git commit` inside the worktree (conventional commit message
+   derived from `feature_branch`; see below).
+2. Merge `conductor/<id>` into `target_branch` (or current HEAD if unset).
+3. Create the feature branch pointer (`git branch -f feat/... conductor/<id>`).
+4. Remove the worktree.
+5. If `--push`: push the feature branch to origin so you can open a PR.
+
+### Feature branch from the planner
+
+The planner can emit a `BRANCH:` directive on its own line:
+
+```
+BRANCH: feat/fix-policy-discovery
+```
+
+The conductor saves this name in state. At `accept` time it creates a local
+branch pointing to the committed tip — ready for a PR to `main` — while the
+merge itself goes into `target_branch` (typically `develop`).
+
+Commit messages follow the [Conventional Commits](https://www.conventionalcommits.org/)
+format, derived automatically from the branch prefix:
+
+| feature branch prefix | commit prefix |
+| --- | --- |
+| `feat/` | `feat:` |
+| `fix/` | `fix:` |
+| `refactor/` | `refactor:` |
+| … | … |
+
+Example: `feat: fix policy discovery bug\n\nWorkitem: wi-20240615-abc123`
+
+### Branch strategy config
+
+By default worktrees branch from the current HEAD and merge back into it.
+To lock the strategy for a repo, set in `.ai/repo.yml`:
+
+```yaml
+source_branch: main     # worktrees are always created from this branch
+target_branch: develop  # conductor accept always merges into this branch
+```
+
+With this config, `conductor accept --push` produces a feature branch ready
+for a PR to `main`, regardless of what branch you happen to have checked out.
+
+## Rewinding with `conductor reopen`
+
+If the result needs revision, reopen the workitem instead of starting over:
+
+```bash
+conductor reopen "the last migration was wrong — column types don't match"
+conductor reopen "reviewer was too strict on style" --from reviewer
+```
+
+`reopen` resets `step_index` and writes a `reopen.md` alongside the goal. The
+context builder injects it as a `## Reopen reason` section so the planner treats
+the rerun as a directed revision of the prior plan. The worktree and feature
+branch are left intact — reopening is continuation, not discard.
+
+`--from <role>` restarts from a specific step (e.g. `reviewer`) without
+re-running the planner.
+
+## Watching execution
+
+During `execute`, each step shows a spinner with the active role and which
+provider is executing it:
+
+```
+  planner (codex) thinking... 12s
+```
+
+For slow models that can loop silently, add `--stream` to see raw provider output
+in real time:
+
+```bash
+conductor execute --stream
+```
+
+Prompt files for each step are written to `.ai/workitems/<id>/outputs/` **before**
+the provider runs, so you can inspect what was sent to the model while it's
+thinking.
+
+## Cross-project workitems and workspace execution
+
+### Defining cross-project workitems
 
 ```bash
 conductor workspace add ~/projects/service-a          # default workspace
 conductor workspace add ~/projects/service-b -w work  # a named workspace
-conductor workspace list                              # roots + workitem counts
-conductor dashboard                                   # localhost web view
+conductor workspace list
+conductor define "migrate auth tokens across all services" -w default
+conductor refine -w default
+conductor approve -w default
+conductor status -w default
+```
+
+Cross-project workitems live under `~/.config/conductor/workspaces/<name>/` and
+receive context from all repos in the workspace (instructions + paths) during
+`refine`, so the refiner can reason across projects.
+
+### Executing cross-project workitems
+
+```bash
+conductor execute -w default          # two-phase: planner once, then per-repo
+conductor execute -w default --stream # same with live output
+conductor accept  -w default          # commit + merge in every project repo
+conductor accept  -w default --push   # same, then push each feature branch
+conductor reopen  "reason" -w default # reopen and re-run across all repos
+```
+
+The workspace flow runs in two phases:
+1. **Planner** once, with the combined cross-project context.
+2. **Implementer + reviewer** independently per project, each in its own
+   worktree.
+
+### Read-only dashboard
+
+```bash
+conductor dashboard           # localhost web view of all registered projects
+conductor dashboard -w work   # scoped to one workspace
 ```
 
 `conductor dashboard` starts a small server on `127.0.0.1` (default port 8787;
-`--no-open` to skip launching a browser, `-w NAME` to scope to one workspace). It
-scans the registered projects and renders every workitem's state, auto-refreshing
-every few seconds.
+`--no-open` to skip launching a browser). It scans the registered projects and
+renders every workitem's state, auto-refreshing every few seconds.
 
 It is **read-only** — it never runs agents or writes anything, only reads the
 `state.yml` files the engine produces — and binds to loopback only. The registry
 lives under `~/.config/conductor/` and stores paths only (no project state, no
-secrets). It records *where* your projects are, nothing about how to reach any
-model.
+secrets).
 
 ## State model
 
 Each workitem keeps a compact `state.yml` (stage, status, next action,
-iterations, open issues, artifacts, history) alongside its `goal.yml`. The
-model is deliberately small — the smallest workflow that preserves safety — and
-designed to grow toward the execution loop without restructuring.
+iterations, open issues, artifacts, history, feature branch) alongside its
+`goal.yml`. The model is deliberately small — the smallest workflow that
+preserves safety — and designed to grow toward the execution loop without
+restructuring.
 
 ## Roadmap
 
@@ -200,8 +330,8 @@ across projects).
 - **`ollama` provider** — native local models via Ollama (`/api/chat`); no API
   key required; `base_url` defaults to `http://localhost:11434`.
 - **Context/token strategy** — prior step outputs are deduped by role (most
-  recent per role only) and capped at 8 000 chars each; fix-iteration header
-  added so agents know they are in a fix loop.
+  recent per role only) and capped; fix-iteration header added so agents know
+  they are in a fix loop.
 - **Refiner YAML robustness** — prompt rule to avoid TypeScript-like syntax in
   YAML values; `_preprocess_yaml` fallback that quotes problematic values before
   retrying `yaml.safe_load`; `_contract_list_items_are_strings` guard against
@@ -215,24 +345,36 @@ across projects).
   <workspace>` creates workitems that live at the workspace level (under
   `~/.config/conductor/workspaces/<name>/`). The refiner receives context from
   all repos in the workspace (instructions + paths) so it can reason about
-  cross-project bugs and changes. Produces a cross-project contract the human
-  uses to create individual workitems per repo.
+  cross-project bugs and changes.
+- **`conductor execute -w <workspace>`** — two-phase workspace execution: planner
+  once with cross-project context, then implementer + reviewer independently per
+  project in isolated git worktrees.
+- **Git worktree isolation** — `execute` creates `.ai/worktrees/<id>/` on
+  `conductor/<id>` so agent edits never touch the working tree.
+- **`conductor accept`** — commit the worktree (`git add -A && git commit`),
+  merge into `target_branch`, create the feature branch pointer, remove the
+  worktree. `--push` pushes the feature branch after merging.
+- **Branch strategy config** — `source_branch` / `target_branch` in `repo.yml`
+  so worktrees always branch from (e.g.) `main` and `accept` always merges into
+  `develop`, regardless of current HEAD.
+- **Feature branch from planner** — planner emits `BRANCH: feat/...`; conductor
+  saves it in state and creates a local branch at `accept` time. Commit messages
+  follow the Conventional Commits format derived from the branch prefix.
+- **`conductor reopen "<reason>"`** — resets `step_index` and injects
+  `reopen.md` as planner context. `--from <role>` restarts from a specific step.
+  Worktree and feature branch are left intact.
+- **Live progress during `execute`** — spinner shows role + provider name while
+  each step runs; `--stream` streams raw provider output live instead.
+- **Prompt files before provider call** — each step's prompt is written to disk
+  before the provider runs, so you can inspect it while the model is thinking.
 
 ### Track A — execution
 
-- **`conductor reopen "<reason>"` command** — resets `step_index`, `stage` and
-  `status` to restart execution, and writes a `reopen.md` with the human's
-  reason. The context builder injects it as a `## Reopen reason` section so the
-  planner treats the rerun as a directed revision of the prior plan, not a fresh
-  start. Optional `--from <role>` to restart from a specific step.
 - **Semantic stop conditions** — scope change, secrets/prod access,
   reviewer/implementer deadlock (the deterministic caps already exist).
 - **`cli_pty` provider** *(on-demand)* — drive interactive-only CLIs via a
   pseudo-terminal; the most brittle provider, built only when a needed CLI lacks
   a headless mode.
-- **Sessions/sandbox** — git worktrees, generated docker-compose, dynamic ports,
-  smoke tests. The workitem (memory/state) is already separated from the session
-  (runtime), so this is additive.
 
 ### Track B — visibility / UX
 
@@ -244,16 +386,16 @@ have shipped — see *Done*.
   triggering/approving runs from the UI. The UI configures *env-var names*, never
   stored keys, and stays localhost-only until auth is designed.
 
-### Smaller tweaks
+### Backlog
 
-- **`conductor accept`** — after reviewing the result, commit the working tree
-  changes with a message derived from the goal title (`git add -A && git commit
-  -m "..."`). Optional `--push` flag. Keeps the human in control (they still
-  review before running it) but removes the manual git steps.
-- **Live progress indicator during `execute`** — while a CLI provider runs (30–90s
-  blocking call), show a spinner + elapsed timer so the user knows something is
-  happening. Needs an `on_step_start` callback in the engine (called before
-  `provider.run()`); `cli.py` renders a Rich spinner between that and `on_step`.
+- **CLI tab completion** — re-enable Typer's shell completion (`add_completion=True`)
+  for commands and flags; add dynamic completion for workitem IDs and workspace names.
+- **Better terminal input in `refine`** — `typer.prompt()` doesn't support
+  readline (arrow keys, `Ctrl+←`, history). Fix: activate `readline` stdlib before
+  the question loop, or use `prompt_toolkit` for a richer experience.
+- **AI commit messages** — call a lightweight provider with `git diff --staged`
+  to generate a richer conventional commit message. Keep the mechanical fallback
+  if the provider fails or isn't configured.
 
 ## Design principle
 
