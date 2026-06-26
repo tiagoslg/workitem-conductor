@@ -49,6 +49,7 @@ from .scaffold import scaffold_ai, scaffold_workspace
 from .workitems.manager import (
     approve_goal,
     create_workitem,
+    fork_workitem,
     get_active_id,
     list_workitems,
     load_workitem,
@@ -405,9 +406,11 @@ def refine(
         workspace_info=workspace_info,
     )
 
+    refiner_provider_name = provider_for("refiner").name
+    provider_tag = f" ({refiner_provider_name})" if refiner_provider_name else ""
     mode = "[yellow]dry-run[/yellow]" if dry_run else (
         f"refiner from workspace config · [dim]{len(paths.project_roots)} projects[/dim]"
-        if workspace else "refiner from repo.yml"
+        if workspace else f"refiner from repo.yml"
     )
     console.print(f"Refining [bold]{wid}[/bold] · {mode}\n")
 
@@ -422,7 +425,8 @@ def refine(
     spinner = _SpinnerGuard()
 
     def on_round_start(round_no: int) -> None:
-        spinner.start(f"  [cyan]refiner[/cyan] [dim]round {round_no}…[/dim]")
+        via = f" [dim]({refiner_provider_name})[/dim]" if refiner_provider_name else ""
+        spinner.start(f"  [cyan]refiner[/cyan]{via} [dim]round {round_no}…[/dim]")
 
     def on_round(round_no: int, kind: str) -> None:
         elapsed = spinner.stop()
@@ -842,10 +846,12 @@ def reopen(
     wt_path = worktree_path(paths, wid)
     if wt_path.is_dir():
         if step_index == 0:
-            # Restarting from scratch — discard worktree work but keep feature branch.
-            remove_worktree(paths, wid, delete_branch=True)
+            # Remove the worktree directory but keep the branch — the next execute
+            # will recreate the worktree from the existing conductor/<id> tip so
+            # each reopen iteration builds on top of the previous work.
+            remove_worktree(paths, wid, delete_branch=False)
             console.print(
-                f"  [dim]worktree removed · branch conductor/{wid} deleted[/dim]"
+                f"  [dim]worktree removed · branch conductor/{wid} preserved[/dim]"
             )
         else:
             # Restarting from a later step (e.g. --from reviewer) — the
@@ -895,9 +901,9 @@ def _reopen_workspace(workspace: str, workitem_id: str | None, reason: str) -> N
         project_paths = AiPaths(root=project_root / ".ai")
         wt_path = worktree_path(project_paths, wid)
         if wt_path.is_dir():
-            remove_worktree(project_paths, wid, delete_branch=True)
+            remove_worktree(project_paths, wid, delete_branch=False)
             console.print(
-                f"  [dim]{project_name}: worktree removed · branch conductor/{wid} deleted[/dim]"
+                f"  [dim]{project_name}: worktree removed · branch conductor/{wid} preserved[/dim]"
             )
 
     updated = reopen_workitem(ws_paths, wid, reason)
@@ -909,6 +915,62 @@ def _reopen_workspace(workspace: str, workitem_id: str | None, reason: str) -> N
         f"next=[bold]{updated.state.next_action}[/bold]"
     )
     console.print(f"\nNext: [bold]conductor execute -w {workspace}[/bold]")
+
+
+@app.command()
+def fork(
+    goal: str = typer.Argument(..., help="Focused goal for this fork."),
+    workitem_id: str = typer.Option(
+        None, "--id", help="Parent workitem to fork from (defaults to the active one)."
+    ),
+) -> None:
+    """Fork a workitem to continue on the same branch with a clean context.
+
+    Creates a new workitem branching from the tip of the parent's
+    ``conductor/<id>`` branch. The fork inherits the parent's feature branch
+    so all iterations land on the same PR branch at accept time. The new
+    workitem starts with a clean context — no prior outputs, no reopen history.
+
+    Use this when you need to fix something specific without re-evaluating
+    all the work that was already correct.
+    """
+    paths = _load_paths()
+    wid = workitem_id or get_active_id(paths)
+    if wid is None:
+        err_console.print(
+            "[red]No workitem to fork.[/red]  Specify --id or set an active workitem."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        parent = load_workitem(paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    child = fork_workitem(paths, parent, goal)
+
+    parent_branch = worktree_branch(wid)
+    try:
+        create_worktree(paths, child.workitem_id, source_branch=parent_branch)
+    except RuntimeError as exc:
+        err_console.print(f"[red]Could not create worktree:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"[green]Forked[/green] [bold]{wid}[/bold] → [bold]{child.workitem_id}[/bold]"
+    )
+    console.print(f"  goal: {goal}")
+    if child.state.feature_branch:
+        console.print(
+            f"  feature branch: [bold]{child.state.feature_branch}[/bold] (inherited)"
+        )
+    console.print(
+        f"  worktree: .ai/worktrees/{child.workitem_id}"
+        f" · branch: conductor/{child.workitem_id}"
+    )
+    console.print(f"  branched from: conductor/{wid}")
+    console.print("\nNext: [bold]conductor execute[/bold]")
 
 
 @app.command()

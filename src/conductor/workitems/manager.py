@@ -162,6 +162,47 @@ def reopen_workitem(
     return load_workitem(paths, workitem_id)
 
 
+def fork_workitem(paths: AiPaths, parent: Workitem, goal: str) -> Workitem:
+    """Create a new workitem forked from ``parent``.
+
+    The fork inherits the parent's ``feature_branch`` and ``flow`` so all
+    iterations land on the same PR branch at accept time. The goal contract is
+    pre-approved so the fork goes straight to execute — no refine/approve
+    cycle needed. The caller is responsible for creating the worktree from the
+    tip of ``conductor/<parent-id>``.
+    """
+    paths.workitems_dir.mkdir(parents=True, exist_ok=True)
+    workitem_id = generate_id(goal, paths.workitems_dir)
+    directory = paths.workitem_dir(workitem_id)
+    (directory / "outputs").mkdir(parents=True, exist_ok=True)
+    (directory / "reviews").mkdir(parents=True, exist_ok=True)
+
+    contract = GoalContract(goal=goal.strip(), scope=Scope(), approved=True)
+    state = WorkitemState(
+        workitem_id=workitem_id,
+        title=title_from_goal(goal),
+        flow=parent.state.flow,
+        feature_branch=parent.state.feature_branch,
+        stage="defined",
+        status="ready",
+        next_action="execute",
+        artifacts={
+            "goal": "goal.yml",
+            "plan": None,
+            "implementation": None,
+            "review": None,
+            "final_report": None,
+        },
+    )
+    state.record(f"forked from {parent.workitem_id}")
+
+    _goal_path(directory).write_text(contract.to_yaml(), encoding="utf-8")
+    _state_path(directory).write_text(state.to_yaml(), encoding="utf-8")
+    set_active_id(paths, workitem_id)
+
+    return Workitem(workitem_id=workitem_id, directory=directory, goal=contract, state=state)
+
+
 def list_workitems(paths: AiPaths) -> list[str]:
     """All workitem ids, sorted (chronological thanks to the date prefix)."""
     if not paths.workitems_dir.is_dir():

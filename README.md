@@ -212,7 +212,6 @@ If the result needs revision, reopen the workitem instead of starting over:
 
 ```bash
 conductor reopen "the last migration was wrong — column types don't match"
-conductor reopen "reviewer was too strict on style" --from reviewer
 ```
 
 `reopen` resets `step_index` and writes a `reopen.md` alongside the goal. The
@@ -220,8 +219,22 @@ context builder injects it as a `## Reopen reason` section so the planner treats
 the rerun as a directed revision of the prior plan. The worktree and feature
 branch are left intact — reopening is continuation, not discard.
 
-`--from <role>` restarts from a specific step (e.g. `reviewer`) without
-re-running the planner.
+### Skipping the planner with `--from`
+
+For small corrections that don't need a new plan, restart from a later step:
+
+```bash
+conductor reopen "fix the path in the /emails endpoint" --from implementer
+```
+
+This skips the planner entirely. The implementer receives:
+- The reopen reason (what to fix)
+- The prior reviewer and validator output (what they flagged as wrong)
+- The worktree as-is (all previous work preserved)
+
+Use `--from` when you know exactly what to fix and re-planning would just
+re-evaluate work that was already correct. Use a full reopen (no `--from`) when
+the plan itself needs to change.
 
 ## Watching execution
 
