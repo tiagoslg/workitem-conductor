@@ -52,6 +52,10 @@ default_flow: simple-change
 #
 # refine:
 #   max_question_rounds: 5   # cap on clarifying-question rounds in `refine`
+#
+# Branch strategy (optional — defaults to current HEAD if unset):
+# source_branch: main     # worktrees are created from this branch
+# target_branch: develop  # conductor accept merges into this branch
 providers: {}
 roles: {}
 """
@@ -229,6 +233,64 @@ line. Emit one — and only one — per response, on its own line:
   enclosed in single or double quotes.
 """
 
+WORKSPACE_CHANGE_FLOW = """\
+# Flow: workspace-change
+# Cross-project execution: planner runs once with full workspace context;
+# implementer + reviewer run per project listed in target_projects.
+name: workspace-change
+description: Cross-project plan, then per-project implement + review.
+steps:
+  - role: planner
+    stage: planning
+  - role: implementer
+    stage: implementing
+  - role: reviewer
+    stage: reviewing
+    gate: review
+    on_changes: implementer
+max_fix_iterations: 3
+"""
+
+WORKSPACE_PLANNER_MD = """\
+# Role: planner (workspace)
+
+You turn an approved cross-project goal into a concrete, per-project
+implementation plan.
+
+## Inputs
+- the goal contract (goal, scope, acceptance criteria, target_projects);
+- instructions and file structure for every project in the workspace.
+
+## Output
+Write one clearly labelled section per project listed in `target_projects`.
+Each section must be self-contained — an implementer running inside that
+project's repository will only see its own section, the goal contract, and
+nothing else.
+
+Each per-project section must cover:
+- objective for this project and its current relevant state;
+- exact files to create or modify (relative paths within that repo);
+- for each file: the specific changes to make;
+- ordered implementation tasks concrete enough to follow without judgement;
+- tests to add or update;
+- any ambiguity that requires stopping to ask the human.
+
+The **first line** of your response must be:
+
+    BRANCH: feat/<kebab-slug>
+
+Use the same branch name across all projects (the conductor creates per-project
+worktrees on `conductor/<workitem-id>` automatically; the BRANCH hint is for
+the human's reference).
+
+## Rules
+- label each section clearly: `## Project: <name>` where `<name>` matches the
+  entry in `target_projects` exactly;
+- do not expand the approved scope;
+- if a project in `target_projects` requires no changes, say so explicitly so
+  the implementer knows to skip it.
+"""
+
 WORKSPACE_CONFIG_YML = """\
 # workitem-conductor workspace configuration
 # Providers and roles used for cross-project workitems in this workspace.
@@ -243,6 +305,10 @@ WORKSPACE_CONFIG_YML = """\
 #
 # roles:
 #   refiner: { provider: claude_cli }
+#
+# Branch strategy (optional — defaults to current HEAD if unset):
+# source_branch: main     # worktrees are created from this branch
+# target_branch: develop  # conductor accept merges into this branch
 providers: {}
 roles: {}
 """
@@ -263,6 +329,7 @@ Keep this short and concrete.
 AI_GITIGNORE = """\
 # Runtime artifacts — not versioned by default.
 workitems/
+worktrees/
 sessions/
 runs/
 cache/
@@ -300,12 +367,15 @@ def scaffold_workspace(root: Path, name: str) -> ScaffoldResult:
     files = [
         ("config.yml", WORKSPACE_CONFIG_YML),
         ("instructions.md", WORKSPACE_INSTRUCTIONS_MD.format(name=name)),
+        ("flows/workspace-change.yml", WORKSPACE_CHANGE_FLOW),
+        ("roles/planner.md", WORKSPACE_PLANNER_MD),
     ]
     for rel, content in files:
         target = root / rel
         if target.exists():
             result.skipped.append(rel)
         else:
+            target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             result.created.append(rel)
     return result

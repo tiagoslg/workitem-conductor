@@ -128,6 +128,68 @@ def test_infer_questions_from_bare_numbered_list():
     ]
 
 
+def test_contract_inside_bare_code_fence():
+    # Model wraps everything in a ``` block with CONTRACT: as the first line.
+    # _extract_contract_yaml must strip the closing ``` before yaml.safe_load.
+    text = (
+        "I have all the context I need. Here is the implementation contract:\n\n"
+        "---\n\n"
+        "```\n"
+        "CONTRACT:\n"
+        "scope:\n"
+        "  include:\n"
+        "    - src/policy.py\n"
+        "acceptance_criteria:\n"
+        "  - tests pass\n"
+        "constraints:\n"
+        "  - no public API changes\n"
+        "```\n"
+    )
+    resp = parse_refine_response(text)
+    assert resp.kind == "contract"
+    assert resp.contract["scope"]["include"] == ["src/policy.py"]
+    assert resp.contract["acceptance_criteria"] == ["tests pass"]
+
+
+def test_infer_contract_from_fence_with_contract_key():
+    # _infer_contract must unwrap {"CONTRACT": {...}} when CONTRACT: is the
+    # yaml key inside the fenced block.
+    text = (
+        "Here is the contract:\n"
+        "```yaml\n"
+        "CONTRACT:\n"
+        "  scope:\n"
+        "    include: [src/http.py]\n"
+        "  acceptance_criteria: [retries on 5xx]\n"
+        "```\n"
+    )
+    resp = parse_refine_response(text)
+    assert resp.kind == "contract"
+    assert resp.contract["scope"]["include"] == ["src/http.py"]
+
+
+def test_parse_bold_q_headers_with_preamble():
+    # Larger models emit a preamble paragraph then bold Q-numbered questions.
+    text = (
+        "QUESTIONS:\n\n"
+        "I've read both repos. The IDs align, so the merge is straightforward. "
+        "Before I write the contract I need answers to these questions:\n\n"
+        "**Q1 — Opt-in or always-on?**\n"
+        "Every other enrichment is behind a boolean flag. Should this follow the same pattern?\n\n"
+        "**Q2 — Which fields to surface?**\n"
+        "The response has `initial_capital_amount`, `committed_amount`, etc. Subset or all?\n\n"
+        "**Q3 — Error handling?**\n"
+        "If the downstream service is unreachable, partial success or hard fail?\n"
+    )
+    resp = parse_refine_response(text)
+    assert resp.kind == "questions"
+    assert len(resp.questions) == 3
+    assert "Opt-in or always-on" in resp.questions[0]
+    assert "boolean flag" in resp.questions[0]  # explanation included
+    assert "Which fields to surface" in resp.questions[1]
+    assert "Error handling" in resp.questions[2]
+
+
 def test_prose_without_list_is_not_mistaken_for_questions():
     # a question mark in prose must not trigger the questions path
     assert parse_refine_response("Is this clear enough? I think so.").kind == "unknown"

@@ -24,7 +24,7 @@ _FALLBACK_ROLE_PROMPT = (
     "ask the human.\n"
 )
 
-_MAX_OUTPUT_CHARS = 8_000  # ~2k tokens; enough for a full plan or detailed review
+_MAX_OUTPUT_CHARS = 64_000  # ~16k tokens; large enough for detailed plans and reviews
 
 
 def load_role_prompt(paths: AiPaths | WorkspacePaths, role: str) -> str:
@@ -109,6 +109,97 @@ def _prior_outputs(workitem: Workitem) -> list[tuple[str, str]]:
             )
         results.append((path.name, text))
     return results
+
+
+def build_workspace_planner_context(ws_paths: "WorkspacePaths", workitem: Workitem) -> str:
+    """Compose the planner prompt for a workspace workitem (cross-project).
+
+    The planner receives the full cross-project context so it can produce a
+    per-project plan. Its output is later injected into each project's
+    implementer/reviewer context.
+    """
+    parts: list[str] = [load_role_prompt(ws_paths, "planner").rstrip()]
+    parts.append("\n---\n")
+    parts.append(build_cross_project_section(ws_paths))
+
+    parts.append("\n---\n## Workitem\n")
+    parts.append(f"- id: {workitem.workitem_id}")
+    parts.append(f"- title: {workitem.state.title}")
+
+    parts.append("\n## Goal contract\n")
+    parts.append("```yaml\n" + workitem.goal.to_yaml().rstrip() + "\n```")
+
+    reopen_file = workitem.directory / "reopen.md"
+    if reopen_file.is_file():
+        parts.append("\n## Reopen reason\n")
+        parts.append(reopen_file.read_text(encoding="utf-8").strip())
+
+    parts.append(
+        "\n## Your task\n"
+        "Act as the **planner** and produce a per-project implementation plan. "
+        "Write one `## Project: <name>` section per entry in `target_projects`. "
+        "Each section must be self-contained — the implementer for that project "
+        "only sees its own section."
+    )
+    return "\n".join(parts) + "\n"
+
+
+def build_workspace_project_context(
+    project_paths: AiPaths,
+    workitem: Workitem,
+    role: str,
+    *,
+    workspace_plan: str | None = None,
+    prior_implementer_output: str | None = None,
+    fix_iteration: int = 0,
+) -> str:
+    """Compose the implementer or reviewer prompt for one project in a workspace run.
+
+    ``workspace_plan`` is the workspace planner's full output (truncated to
+    _MAX_OUTPUT_CHARS). ``prior_implementer_output`` carries the most recent
+    implementer output for the reviewer or for a fix-loop round.
+    """
+    parts: list[str] = [load_role_prompt(project_paths, role).rstrip()]
+
+    parts.append("\n---\n## Workitem\n")
+    parts.append(f"- id: {workitem.workitem_id}")
+    parts.append(f"- title: {workitem.state.title}")
+
+    parts.append("\n## Goal contract\n")
+    parts.append("```yaml\n" + workitem.goal.to_yaml().rstrip() + "\n```")
+
+    if workspace_plan:
+        plan_text = workspace_plan
+        if len(plan_text) > _MAX_OUTPUT_CHARS:
+            omitted = len(plan_text) - _MAX_OUTPUT_CHARS
+            plan_text = (
+                plan_text[:_MAX_OUTPUT_CHARS]
+                + f"\n\n[... truncated — {omitted} chars omitted ...]\n"
+            )
+        parts.append("\n## Cross-project implementation plan\n")
+        parts.append(plan_text.rstrip())
+
+    if prior_implementer_output:
+        header = (
+            f"\n## Implementer output (fix round {fix_iteration})\n"
+            if fix_iteration > 0
+            else "\n## Implementer output\n"
+        )
+        impl_text = prior_implementer_output
+        if len(impl_text) > _MAX_OUTPUT_CHARS:
+            omitted = len(impl_text) - _MAX_OUTPUT_CHARS
+            impl_text = (
+                impl_text[:_MAX_OUTPUT_CHARS]
+                + f"\n\n[... truncated — {omitted} chars omitted ...]\n"
+            )
+        parts.append(header)
+        parts.append(impl_text.rstrip())
+
+    parts.append(
+        "\n## Your task\n"
+        f"Act as the **{role}** and produce your work product now."
+    )
+    return "\n".join(parts) + "\n"
 
 
 def build_context(paths: AiPaths, workitem: Workitem, role: str) -> str:

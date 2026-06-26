@@ -54,6 +54,11 @@ def registry_path() -> Path:
     return config_home() / "conductor" / "workspaces.yml"
 
 
+def global_defaults_path() -> Path:
+    """Path to the machine-global provider/role defaults (~/.config/conductor/defaults.yml)."""
+    return config_home() / "conductor" / "defaults.yml"
+
+
 def load_registry() -> WorkspaceRegistry:
     """Load the registry, or return defaults when the file is absent."""
     path = registry_path()

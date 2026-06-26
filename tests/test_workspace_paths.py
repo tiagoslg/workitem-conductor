@@ -65,10 +65,15 @@ def test_workspace_paths_cwd_no_projects(tmp_path: Path):
 def test_scaffold_workspace_creates_files(tmp_path: Path):
     root = tmp_path / "ws"
     result = scaffold_workspace(root, "my-ws")
-    assert set(result.created) == {"config.yml", "instructions.md"}
+    assert set(result.created) == {
+        "config.yml", "instructions.md",
+        "flows/workspace-change.yml", "roles/planner.md",
+    }
     assert result.skipped == []
     assert (root / "config.yml").is_file()
     assert "my-ws" in (root / "instructions.md").read_text()
+    assert (root / "flows" / "workspace-change.yml").is_file()
+    assert (root / "roles" / "planner.md").is_file()
 
 
 def test_scaffold_workspace_is_idempotent(tmp_path: Path):
@@ -76,7 +81,10 @@ def test_scaffold_workspace_is_idempotent(tmp_path: Path):
     scaffold_workspace(root, "ws")
     result2 = scaffold_workspace(root, "ws")
     assert result2.created == []
-    assert set(result2.skipped) == {"config.yml", "instructions.md"}
+    assert set(result2.skipped) == {
+        "config.yml", "instructions.md",
+        "flows/workspace-change.yml", "roles/planner.md",
+    }
 
 
 # --- workitem lifecycle via WorkspacePaths ---

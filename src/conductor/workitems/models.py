@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 Stage = Literal[
     "defined",
@@ -72,7 +72,34 @@ class GoalContract(BaseModel):
     constraints: list[str] = Field(default_factory=list)
     validation: list[str] = Field(default_factory=list)
     stop_conditions: list[str] = Field(default_factory=list)
+    target_projects: list[str] = Field(default_factory=list)
     approved: bool = False
+
+    @field_validator(
+        "acceptance_criteria", "constraints", "validation",
+        "stop_conditions", "target_projects",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_str_list(cls, v: object) -> object:
+        """Coerce non-string list items to strings.
+
+        YAML parses a list item that ends with ``:`` as a mapping key, turning
+        ``- Verify the endpoint:`` into ``{"Verify the endpoint": ...}``.
+        Round-trip the mapping through yaml.dump so the item is still readable
+        rather than raising a ValidationError that crashes ``conductor status``.
+        """
+        if not isinstance(v, list):
+            return v
+        result: list[str] = []
+        for item in v:
+            if isinstance(item, str):
+                result.append(item)
+            elif item is not None:
+                result.append(
+                    yaml.dump(item, default_flow_style=False, allow_unicode=True).strip()
+                )
+        return result
 
     def to_yaml(self) -> str:
         return _dump_yaml(self.model_dump())
@@ -99,6 +126,7 @@ class WorkitemState(BaseModel):
     step_index: int = 0
     iterations: int = 0
     fix_iterations: int = 0
+    feature_branch: str | None = None
     open_issues: list[str] = Field(default_factory=list)
     human_overrides: list[str] = Field(default_factory=list)
     artifacts: dict[str, str | None] = Field(default_factory=dict)
