@@ -26,6 +26,37 @@ dashboard UI. Also: trigger/approve runs from the dashboard. This is where a
 daemon + write access + secrets concerns enter (deferred until B1/B2 are
 validated in real use).
 
+### 4. Phased execution — planos grandes em contexto reduzido
+
+Quando o planner gera um plano com muitas tasks (ex: 15 endpoints a documentar),
+o implementer bloqueia porque o contexto excede a sua janela.
+
+**Problema**: o implementer recebe o plano completo de uma vez e tenta fazer tudo
+num único invocation. Modelos com janela menor (Qwen local, etc.) ficam bloqueados.
+
+**Abordagem preferida — PHASE: markers no plano**:
+O planner emite marcadores de fase no output:
+
+```
+PHASE 1: endpoints de autenticação (tasks 1-5)
+...
+PHASE 2: endpoints de dados (tasks 6-10)
+...
+```
+
+O conductor executa uma fase de cada vez: passa ao implementer apenas a secção
+`PHASE N` em vez do plano completo. Avança para a fase seguinte após review/validate.
+
+**Alternativa — `conductor fork` manual por fase**:
+Já disponível hoje: o utilizador faz `conductor fork "document auth endpoints (phase 1 of 3)"`
+e repete. Funciona mas é manual.
+
+**Ponto de implementação**:
+- Planner role prompt: instruir a emitir `PHASE N:` quando o plano tem mais de X tasks
+- Engine: detetar fases no output do planner, executar implementer por fase em loop
+- CLI: mostrar progresso por fase (`phase 1/3 · implementing…`)
+- `build_context`: passar só a secção da fase atual ao implementer
+
 ---
 
 ## Deferred / low priority
