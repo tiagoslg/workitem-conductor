@@ -1,6 +1,7 @@
 """Git worktree isolation for workitem execution.
 
-Each workitem gets its own worktree at .ai/worktrees/<id> on branch
+Each workitem gets its own worktree under the central data directory
+(``AiPaths.worktree_dir``, outside the git-tracked repo) on branch
 conductor/<id>. The implementer runs there, leaving the main working tree
 untouched. The branch is the audit trail; the worktree directory is a
 temporary working space, cleaned up on accept or reopen.
@@ -20,7 +21,7 @@ def branch_name(workitem_id: str) -> str:
 
 
 def worktree_path(paths: AiPaths, workitem_id: str) -> Path:
-    return paths.root / "worktrees" / workitem_id
+    return paths.worktree_dir(workitem_id)
 
 
 def _is_registered(repo_root: Path, wt_path: Path) -> bool:
@@ -42,7 +43,7 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 def create_worktree(
     paths: AiPaths, workitem_id: str, source_branch: str | None = None
 ) -> Path:
-    """Create (or reuse) a worktree at .ai/worktrees/<id> on branch conductor/<id>.
+    """Create (or reuse) a worktree at the central worktree dir on branch conductor/<id>.
 
     If a valid worktree already exists (resumed execution), returns the path
     as-is. A stale directory without a matching git registration is removed and

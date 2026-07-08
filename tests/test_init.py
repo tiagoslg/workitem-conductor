@@ -15,7 +15,6 @@ EXPECTED = {
     "roles/implementer.md",
     "roles/reviewer.md",
     "roles/refiner.md",
-    ".gitignore",
 }
 
 
@@ -60,47 +59,22 @@ def test_scaffold_keeps_user_edits(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# conductor init — gitignore integration
+# conductor init — .ai/ is versionable, never gitignored by init
 # ---------------------------------------------------------------------------
 
-def test_init_creates_gitignore_with_ai_entry(tmp_path: Path, monkeypatch):
+def test_init_does_not_touch_project_gitignore(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init"])
 
     assert result.exit_code == 0
-    gitignore = tmp_path / ".gitignore"
-    assert gitignore.is_file()
-    assert ".ai/" in gitignore.read_text()
-    assert "created" in result.output or "added" in result.output
+    assert not (tmp_path / ".gitignore").exists()
+    assert not (tmp_path / ".ai" / ".gitignore").exists()
 
 
-def test_init_appends_to_existing_gitignore(tmp_path: Path, monkeypatch):
+def test_init_leaves_existing_gitignore_untouched(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
 
     runner.invoke(app, ["init"])
 
-    content = (tmp_path / ".gitignore").read_text()
-    assert "node_modules/" in content
-    assert ".ai/" in content
-
-
-def test_init_does_not_duplicate_ai_entry(tmp_path: Path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".gitignore").write_text(".ai/\n", encoding="utf-8")
-
-    result = runner.invoke(app, ["init"])
-
-    content = (tmp_path / ".gitignore").read_text()
-    assert content.count(".ai/") == 1
-    assert "added" not in result.output and "created" not in result.output
-
-
-def test_init_recognises_ai_without_trailing_slash(tmp_path: Path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".gitignore").write_text(".ai\n", encoding="utf-8")
-
-    result = runner.invoke(app, ["init"])
-
-    content = (tmp_path / ".gitignore").read_text()
-    assert content.count(".ai") == 1
+    assert (tmp_path / ".gitignore").read_text() == "node_modules/\n"

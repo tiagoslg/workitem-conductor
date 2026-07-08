@@ -47,6 +47,17 @@ def test_workspace_paths_has_expected_layout(ws_paths: WorkspacePaths):
     assert ws_paths.active_pointer.name == "active_workitem.txt"
 
 
+def test_workspace_runtime_state_lives_outside_config_root(ws_paths: WorkspacePaths):
+    """Workitems/active pointer are central runtime state, not config-home state.
+
+    ``root`` (config.yml, instructions.md, roles/, flows/) stays under
+    config_home; workitems_dir/active_pointer must resolve under data_home
+    instead — mirroring the AiPaths.data_dir split for single-repo projects.
+    """
+    assert not str(ws_paths.workitems_dir).startswith(str(ws_paths.root))
+    assert not str(ws_paths.active_pointer).startswith(str(ws_paths.root))
+
+
 def test_workspace_paths_cwd_common_ancestor(tmp_path: Path):
     fe = tmp_path / "projects" / "fe"
     be = tmp_path / "projects" / "be"

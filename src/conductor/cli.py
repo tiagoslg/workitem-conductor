@@ -199,32 +199,6 @@ def _load_ws_paths(name: str) -> WorkspacePaths:
     return ws_paths
 
 
-def _ensure_ai_in_gitignore(project_root: Path) -> str:
-    """Add ``.ai/`` to the project's root .gitignore if not already present.
-
-    Returns ``"added"`` if the entry was appended to an existing file,
-    ``"created"`` if a new .gitignore was created, or ``"exists"`` if the
-    entry was already there.
-    """
-    gitignore = project_root / ".gitignore"
-    entry = f"{AI_DIRNAME}/"
-
-    if gitignore.is_file():
-        content = gitignore.read_text(encoding="utf-8")
-        lines = content.splitlines()
-        if any(line.strip().rstrip("/") == AI_DIRNAME.rstrip("/") for line in lines):
-            return "exists"
-        separator = "\n" if content and not content.endswith("\n") else ""
-        gitignore.write_text(
-            content + separator + f"\n# workitem-conductor\n{entry}\n",
-            encoding="utf-8",
-        )
-        return "added"
-
-    gitignore.write_text(f"# workitem-conductor\n{entry}\n", encoding="utf-8")
-    return "created"
-
-
 @app.command()
 def init() -> None:
     """Initialize the ``.ai/`` skeleton in the current repository."""
@@ -243,12 +217,6 @@ def init() -> None:
         console.print(f"\n[green]Updated {rel}/[/green] (existing files kept)")
     else:
         console.print(f"\n[yellow]{rel}/ already initialized[/yellow] — nothing to do")
-
-    gitignore_status = _ensure_ai_in_gitignore(Path.cwd())
-    if gitignore_status == "added":
-        console.print(f"  [green]+[/green] .gitignore ← added [bold]{AI_DIRNAME}/[/bold]")
-    elif gitignore_status == "created":
-        console.print(f"  [green]+[/green] .gitignore (created) ← added [bold]{AI_DIRNAME}/[/bold]")
 
     from .workspaces import global_defaults_path
     has_globals = global_defaults_path().is_file()
@@ -443,7 +411,7 @@ def refine(
         raise typer.Exit(code=1)
 
     if outcome.updated:
-        goal_rel = f".ai/workitems/{wid}/goal.yml"
+        goal_rel = paths.workitem_dir(wid) / "goal.yml"
         console.print(
             f"\n[green]Goal contract updated.[/green]  Review/edit [bold]{goal_rel}[/bold], "
             "then run [bold]conductor approve[/bold]."
@@ -594,7 +562,7 @@ def execute(
     )
     branch_from = f" · from [bold]{config.source_branch}[/bold]" if config.source_branch else ""
     console.print(
-        f"  [dim]worktree: .ai/worktrees/{wid} · branch: conductor/{wid}{branch_from}[/dim]\n"
+        f"  [dim]worktree: {wt_path} · branch: conductor/{wid}{branch_from}[/dim]\n"
     )
 
     spinner = _SpinnerGuard(stream=stream)
@@ -648,7 +616,7 @@ def execute(
     if outcome.completed:
         console.print(
             f"\n[green]Flow completed.[/green] Final report: "
-            f"[bold].ai/workitems/{wid}/final_report.md[/bold]"
+            f"[bold]{paths.workitem_dir(wid) / 'final_report.md'}[/bold]"
         )
         console.print("Review it, then accept or reopen the workitem.")
     else:
@@ -857,7 +825,7 @@ def reopen(
             # Restarting from a later step (e.g. --from reviewer) — the
             # implementer's work in the worktree is still valid, keep it.
             console.print(
-                f"  [dim]worktree preserved at .ai/worktrees/{wid}[/dim]"
+                f"  [dim]worktree preserved at {wt_path}[/dim]"
             )
 
     updated = reopen_workitem(paths, wid, reason, step_index=step_index)
@@ -966,7 +934,7 @@ def fork(
             f"  feature branch: [bold]{child.state.feature_branch}[/bold] (inherited)"
         )
     console.print(
-        f"  worktree: .ai/worktrees/{child.workitem_id}"
+        f"  worktree: {worktree_path(paths, child.workitem_id)}"
         f" · branch: conductor/{child.workitem_id}"
     )
     console.print(f"  branched from: conductor/{wid}")
@@ -1386,12 +1354,19 @@ def doctor() -> None:
     """Check local prerequisites (``.ai/`` present, provider CLIs available)."""
     console.print(f"workitem-conductor [dim]v{__version__}[/dim]\n")
 
+    from .home import cache_home, config_home, data_home
+
+    console.print(f"Config home: {config_home() / 'conductor'}")
+    console.print(f"Data home:   {data_home() / 'conductor'}")
+    console.print(f"Cache home:  {cache_home() / 'conductor'}")
+
     paths: AiPaths | None = None
     try:
         paths = require_ai_paths()
-        console.print(f"[green]✓[/green] .ai/ found at {paths.root}")
+        console.print(f"\n[green]✓[/green] .ai/ found at {paths.root}")
+        console.print(f"  [dim]project data: {paths.data_dir}[/dim]")
     except AiRootNotFound:
-        console.print("[yellow]![/yellow] no .ai/ here — run `conductor init`")
+        console.print("\n[yellow]![/yellow] no .ai/ here — run `conductor init`")
 
     console.print("\nProvider CLIs (auth is managed by the CLI itself, not the conductor):")
     for name in KNOWN_PROVIDER_CLIS:

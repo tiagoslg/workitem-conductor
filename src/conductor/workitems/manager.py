@@ -1,8 +1,9 @@
 """Workitem lifecycle: id generation, creation, state I/O and the active pointer.
 
-A workitem lives in ``.ai/workitems/<id>/`` and owns its goal contract, state and
-(later) provider outputs/reviews. Ids follow the reference convention
-``YYYY-MM-DD_<slug>`` so they sort chronologically and read clearly.
+A workitem lives in ``<AiPaths.data_dir>/workitems/<id>/`` — the central data
+home, not ``.ai/`` — and owns its goal contract, state and (later) provider
+outputs/reviews. Ids follow the reference convention ``YYYY-MM-DD_<slug>`` so
+they sort chronologically and read clearly.
 """
 
 from __future__ import annotations
@@ -215,6 +216,7 @@ def list_workitems(paths: AiPaths) -> list[str]:
 
 
 def set_active_id(paths: AiPaths, workitem_id: str) -> None:
+    paths.active_pointer.parent.mkdir(parents=True, exist_ok=True)
     paths.active_pointer.write_text(workitem_id + "\n", encoding="utf-8")
 
 

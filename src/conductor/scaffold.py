@@ -1,9 +1,11 @@
 """Default ``.ai/`` content written by ``conductor init``.
 
-The split is deliberate: everything written here is *versionable* configuration
-that teaches the conductor how to work in this repo (config, flow, role prompts).
-Runtime artifacts (workitems/, sessions/, runs/, cache/) are created lazily and
-git-ignored via the ``.ai/.gitignore`` written below.
+Everything written here is *versionable* configuration that teaches the
+conductor how to work in this repo (config, flow, role prompts). Runtime
+artifacts (workitems, worktrees, the active-workitem pointer) never live under
+``.ai/`` — they're created lazily under the central data home
+(``AiPaths.data_dir``, see ``paths.py``), so there is nothing here to
+git-ignore.
 
 ``scaffold_ai`` is idempotent: it never overwrites a file the user may have
 edited; it only creates what is missing and reports created vs skipped.
@@ -326,17 +328,6 @@ Describe:
 Keep this short and concrete.
 """
 
-AI_GITIGNORE = """\
-# Runtime artifacts — not versioned by default.
-workitems/
-worktrees/
-sessions/
-runs/
-cache/
-active_workitem.txt
-"""
-
-
 @dataclass
 class ScaffoldResult:
     created: list[str] = field(default_factory=list)
@@ -352,7 +343,6 @@ _FILES: tuple[tuple[str, str], ...] = (
     ("roles/implementer.md", IMPLEMENTER_MD),
     ("roles/reviewer.md", REVIEWER_MD),
     ("roles/refiner.md", REFINER_MD),
-    (".gitignore", AI_GITIGNORE),
 )
 
 

@@ -73,6 +73,7 @@ def test_active_pointer_round_trip(paths: AiPaths):
 
 
 def test_get_active_id_ignores_missing_dir(paths: AiPaths):
+    paths.active_pointer.parent.mkdir(parents=True, exist_ok=True)
     paths.active_pointer.write_text("nonexistent-id\n", encoding="utf-8")
     assert get_active_id(paths) is None
 

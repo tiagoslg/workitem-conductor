@@ -33,7 +33,9 @@ def test_branch_name():
 
 
 def test_worktree_path(paths: AiPaths):
-    assert worktree_path(paths, "wi-001") == paths.root / "worktrees" / "wi-001"
+    assert worktree_path(paths, "wi-001") == paths.worktree_dir("wi-001")
+    # must live under the central data dir, not inside .ai/
+    assert not str(worktree_path(paths, "wi-001")).startswith(str(paths.root))
 
 
 # ---------------------------------------------------------------------------

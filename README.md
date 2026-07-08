@@ -48,7 +48,7 @@ cd ~/projects/my-service
 conductor init                      # scaffold .ai/ (config, flow, role prompts)
 conductor define "fix the policy discovery bug"
 conductor refine                    # optional: AI proposes scope/criteria, asking if needed
-#   edit .ai/workitems/<id>/goal.yml — scope, acceptance criteria, stop conditions
+#   edit goal.yml (path shown by `define`/`conductor doctor`) — scope, acceptance criteria, stop conditions
 conductor approve                   # mark the goal approved & ready to execute
 conductor status                    # show the active workitem
 conductor execute                   # run the flow end-to-end
@@ -82,7 +82,8 @@ roles:
 
 ## What `init` writes
 
-Versionable configuration is separated from runtime artifacts:
+`.ai/` holds only versionable configuration — it is never gitignored, so it
+can be committed alongside the code it configures:
 
 ```
 .ai/
@@ -92,12 +93,27 @@ Versionable configuration is separated from runtime artifacts:
   roles/planner.md         # provider-neutral role prompts (versioned)
   roles/implementer.md
   roles/reviewer.md
-  .gitignore               # ignores the runtime dirs below
+  roles/refiner.md
+```
 
-  workitems/<id>/          # runtime: goal.yml, state.yml, outputs/, reviews/
+Runtime state (workitems, worktrees, the active-workitem pointer) never lives
+inside the repo. It's created lazily under a central, per-project data
+directory the conductor owns:
+
+```
+~/.local/share/conductor/projects/<project-id>/
+  workitems/<id>/          # goal.yml, state.yml, outputs/, reviews/
   worktrees/<id>/          # git worktree checkout (active during execute)
   active_workitem.txt      # pointer to the active workitem
 ```
+
+`<project-id>` is derived from the repo's resolved path and is stable across
+invocations from different cwd/subdirectories; `conductor doctor` prints the
+exact resolved path for the current repo. This directory (and the machine-wide
+`~/.config/conductor/` and `~/.cache/conductor/`) resolve via
+`CONDUCTOR_DATA_HOME`/`CONDUCTOR_CONFIG_HOME`/`CONDUCTOR_CACHE_HOME` (falling
+back to the matching `XDG_*_HOME`, then the POSIX defaults) if you need to
+relocate them.
 
 `init` is idempotent — it never overwrites files you've edited.
 
@@ -150,9 +166,10 @@ environment.
 
 ## Git workflow
 
-`conductor execute` creates an isolated **git worktree** at
-`.ai/worktrees/<id>/` on a branch called `conductor/<id>`. All agent edits
-happen inside that worktree and never touch your working tree.
+`conductor execute` creates an isolated **git worktree** under the central
+data directory (`~/.local/share/conductor/projects/<project-id>/worktrees/<id>/`,
+shown by `conductor doctor`) on a branch called `conductor/<id>`. All agent
+edits happen inside that worktree and never touch your working tree.
 
 When you're happy with the result, `conductor accept` brings the changes in:
 
@@ -252,7 +269,8 @@ in real time:
 conductor execute --stream
 ```
 
-Prompt files for each step are written to `.ai/workitems/<id>/outputs/` **before**
+Prompt files for each step are written to the workitem's `outputs/` directory
+(under the central data dir — `conductor execute` prints its path) **before**
 the provider runs, so you can inspect what was sent to the model while it's
 thinking.
 
@@ -270,9 +288,13 @@ conductor approve -w default
 conductor status -w default
 ```
 
-Cross-project workitems live under `~/.config/conductor/workspaces/<name>/` and
-receive context from all repos in the workspace (instructions + paths) during
-`refine`, so the refiner can reason across projects.
+A workspace's curated config (`config.yml`, `instructions.md`, `roles/`,
+`flows/`) lives under `~/.config/conductor/workspaces/<name>/`; its runtime
+state (workitems, active-workitem pointer) lives under
+`~/.local/share/conductor/workspaces/<name>/` — the same config/data split
+`.ai/` has for single-repo projects. The refiner receives context from all
+repos in the workspace (instructions + paths) during `refine`, so it can
+reason across projects.
 
 ### Executing cross-project workitems
 
@@ -355,15 +377,16 @@ across projects).
   scans the registered projects and renders every workitem's state. Pure read,
   loopback-only.
 - **Cross-project workitems** — `conductor define/refine/approve/status -w
-  <workspace>` creates workitems that live at the workspace level (under
-  `~/.config/conductor/workspaces/<name>/`). The refiner receives context from
-  all repos in the workspace (instructions + paths) so it can reason about
-  cross-project bugs and changes.
+  <workspace>` creates workitems at the workspace level: config under
+  `~/.config/conductor/workspaces/<name>/`, runtime state under
+  `~/.local/share/conductor/workspaces/<name>/`. The refiner receives context
+  from all repos in the workspace (instructions + paths) so it can reason
+  about cross-project bugs and changes.
 - **`conductor execute -w <workspace>`** — two-phase workspace execution: planner
   once with cross-project context, then implementer + reviewer independently per
   project in isolated git worktrees.
-- **Git worktree isolation** — `execute` creates `.ai/worktrees/<id>/` on
-  `conductor/<id>` so agent edits never touch the working tree.
+- **Git worktree isolation** — `execute` creates a worktree under the central
+  data directory on `conductor/<id>` so agent edits never touch the working tree.
 - **`conductor accept`** — commit the worktree (`git add -A && git commit`),
   merge into `target_branch`, create the feature branch pointer, remove the
   worktree. `--push` pushes the feature branch after merging.
@@ -380,6 +403,15 @@ across projects).
   each step runs; `--stream` streams raw provider output live instead.
 - **Prompt files before provider call** — each step's prompt is written to disk
   before the provider runs, so you can inspect it while the model is thinking.
+- **Central runtime storage** — workitems, worktrees and the active-workitem
+  pointer moved out of the git-tracked `.ai/` directory into a per-project
+  directory under `~/.local/share/conductor/` (`conductor doctor` shows the
+  exact path). `.ai/` now holds only versionable config and is no longer
+  gitignored by `init`. Named workspaces got the same config/data split —
+  curated config stays under `~/.config/conductor/workspaces/<name>/`, runtime
+  state moved to `~/.local/share/conductor/workspaces/<name>/`. First step
+  toward treating workitems as a first-class concept the conductor owns, ahead
+  of runs/metrics/memory work.
 
 ### Track A — execution
 
