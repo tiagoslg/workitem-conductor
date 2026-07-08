@@ -50,6 +50,24 @@ def test_inspect_before_any_run(paths: AiPaths, monkeypatch):
     assert "No runs yet" in result.output
 
 
+def test_inspect_active_flag_matches_default(paths: AiPaths, monkeypatch):
+    monkeypatch.chdir(paths.root.parent)
+    wi = create_workitem(paths, "explicit --active")
+    default_result = runner.invoke(app, ["inspect"])
+    active_result = runner.invoke(app, ["inspect", "--active"])
+    assert default_result.exit_code == active_result.exit_code == 0
+    assert wi.workitem_id in default_result.output
+    assert wi.workitem_id in active_result.output
+
+
+def test_inspect_rejects_id_and_active_together(paths: AiPaths, monkeypatch):
+    monkeypatch.chdir(paths.root.parent)
+    wi = create_workitem(paths, "conflicting flags")
+    result = runner.invoke(app, ["inspect", wi.workitem_id, "--active"])
+    assert result.exit_code == 1
+    assert "either" in result.output.lower()
+
+
 def test_inspect_shows_latest_run(git_paths: AiPaths, monkeypatch):
     paths = git_paths
     monkeypatch.chdir(paths.root.parent)

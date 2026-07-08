@@ -297,6 +297,26 @@ worktrees/
 
 Cada execução precisa ser auditável, mensurável e fácil de inspecionar.
 
+## Decisões de implementação (2026-07-08)
+
+Ao implementar M4 sobre o código real, duas decisões deliberadas divergem do
+texto original abaixo:
+
+- **Item 20 (mover prompts/outputs para `runs/<id>/steps/`) — não foi feito
+  fisicamente.** `outputs/NN-role.{prompt,output}.md` continua exatamente como
+  estava (plano, monotónico) porque `core/context.py::_prior_outputs()` já faz
+  glob a esse diretório para montar o "prior step outputs" injetado no prompt
+  seguinte; mover os ficheiros obrigaria a reescrever essa lógica para varrer
+  múltiplos diretórios de run, sem ganho funcional. Em vez disso, `run.yml` é
+  um **manifesto**: cada `StepRecord` tem `index`, `prompt_path` e
+  `output_path` (relativos ao diretório do workitem) que apontam para os
+  ficheiros existentes em `outputs/`, preservando a auditabilidade pedida sem
+  duplicar ou realocar artefactos.
+- **Escopo limitado ao `Engine` single-repo.** `WorkspaceEngine` (execução
+  `-w`, cross-project) não grava `run.yml`/`metrics.yml` nesta fase — mesmo
+  padrão adotado no M3 (`WorkspacePaths` ficou de fora do primeiro corte e foi
+  integrado depois, a pedido). Fast-follow explícito, não um esquecimento.
+
 ## Itens
 
 ### 18. Criar conceito de `run`

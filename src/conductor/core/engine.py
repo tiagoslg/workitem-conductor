@@ -143,12 +143,15 @@ class Engine:
             outcome.steps.append(step_outcome)
             run_steps.append(
                 StepRecord(
+                    index=seq,
                     role=step.role,
                     provider=result.provider,
                     ok=result.ok,
                     duration_sec=round(duration_sec, 2),
                     prompt_chars=len(prompt),
                     output_chars=len(result.output),
+                    prompt_path=prompt_path.relative_to(wi.directory).as_posix(),
+                    output_path=output_path.relative_to(wi.directory).as_posix(),
                 )
             )
 

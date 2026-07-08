@@ -1,5 +1,6 @@
 """Tests for the git worktree isolation module."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -9,8 +10,10 @@ from conductor.core.worktree import (
     branch_name,
     commit_worktree,
     create_worktree,
+    diff_stat,
     merge_worktree,
     remove_worktree,
+    working_tree_diff,
     worktree_path,
 )
 from conductor.paths import AiPaths
@@ -224,3 +227,65 @@ def test_remove_worktree_with_delete_branch(paths: AiPaths):
     branch_delete = next((c for c in calls if "branch" in c and "-D" in c), None)
     assert branch_delete is not None
     assert "conductor/wi-001" in branch_delete
+
+
+# ---------------------------------------------------------------------------
+# diff_stat / working_tree_diff — real git repo, no mocking (the scratch-index
+# behavior can't be verified against a fake subprocess.run).
+# ---------------------------------------------------------------------------
+
+def _git_repo(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+    (root / "tracked.txt").write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True)
+    return root
+
+
+def test_diff_stat_not_a_repo_returns_none(tmp_path: Path):
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    assert diff_stat(not_a_repo) is None
+
+
+def test_diff_stat_counts_untracked_and_modified(tmp_path: Path):
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "tracked.txt").write_text("original\nmore\n", encoding="utf-8")
+    (repo / "new-file.txt").write_text("brand new\n", encoding="utf-8")
+
+    stats = diff_stat(repo)
+    assert stats == {"files_changed": 2, "insertions": 2, "deletions": 0}
+
+
+def test_diff_stat_does_not_touch_real_index(tmp_path: Path):
+    """The scratch-index technique must leave the repo's real staging area untouched."""
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "new-file.txt").write_text("brand new\n", encoding="utf-8")
+
+    diff_stat(repo)
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True,
+    )
+    # "??" means untracked/unstaged — if diff_stat had staged it for real,
+    # this would read "A " instead.
+    assert status.stdout.strip() == "?? new-file.txt"
+
+
+def test_working_tree_diff_shows_untracked_files(tmp_path: Path):
+    """Plain `git diff` never shows untracked files; this must, via the scratch index."""
+    repo = _git_repo(tmp_path / "repo")
+    (repo / "new-file.txt").write_text("brand new\n", encoding="utf-8")
+
+    diff_text = working_tree_diff(repo)
+    assert diff_text is not None
+    assert "new-file.txt" in diff_text
+
+    # and still no side effect on the real index
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True,
+    )
+    assert status.stdout.strip() == "?? new-file.txt"

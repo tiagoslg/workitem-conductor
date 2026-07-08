@@ -41,6 +41,7 @@ from .core.worktree import (
     create_worktree,
     merge_worktree,
     remove_worktree,
+    working_tree_diff,
     worktree_path,
 )
 from .flows.loader import FlowNotFound, load_flow
@@ -515,6 +516,11 @@ def inspect(
     workitem_id: str = typer.Argument(
         None, help="Workitem to inspect (defaults to the active one)."
     ),
+    active: bool = typer.Option(
+        False, "--active",
+        help="Inspect the active workitem (the default when no id is given; "
+        "explicit form for scripts/muscle memory).",
+    ),
     workspace: str = typer.Option(
         None, "--workspace", "-w", help="Inspect a workitem from this workspace."
     ),
@@ -527,6 +533,9 @@ def inspect(
 ) -> None:
     """Show a workitem's goal/state plus its run history and metrics."""
     paths = _load_ws_paths(workspace) if workspace else _load_paths()
+    if workitem_id and active:
+        err_console.print("[red]Pass either a workitem id or --active, not both.[/red]")
+        raise typer.Exit(code=1)
     wid = workitem_id or get_active_id(paths)
     if wid is None:
         err_console.print(
@@ -594,12 +603,10 @@ def inspect(
 
     wt_path = worktree_path(paths, wid)
     if wt_path.is_dir():
-        diff = subprocess.run(
-            ["git", "diff", "--stat"], cwd=wt_path, capture_output=True, text=True,
-        )
-        if diff.returncode == 0 and diff.stdout.strip():
+        diff_text = working_tree_diff(wt_path)
+        if diff_text and diff_text.strip():
             console.print("[bold]Working tree diff:[/bold]")
-            console.print(diff.stdout.rstrip())
+            console.print(diff_text.rstrip())
         else:
             console.print("[dim]Worktree has no uncommitted changes.[/dim]")
     else:

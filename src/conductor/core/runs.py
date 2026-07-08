@@ -19,12 +19,16 @@ _RUN_DIRNAME_RE = re.compile(r"^run-(\d+)$")
 
 
 class StepRecord(BaseModel):
+    index: int
     role: str
     provider: str
     ok: bool
     duration_sec: float
     prompt_chars: int
     output_chars: int
+    #: paths relative to the workitem directory, e.g. "outputs/00-planner.prompt.md"
+    prompt_path: str
+    output_path: str
     verdict: str | None = None
     looped_back: bool = False
 

@@ -55,6 +55,15 @@ def test_engine_run_writes_run_manifest(paths: AiPaths):
     assert all(s.prompt_chars > 0 for s in run.steps)
     assert all(s.output_chars > 0 for s in run.steps)
 
+    # run.yml must reference the actual outputs/ artifacts for this run —
+    # it's a manifest, not a copy, but has to be auditable by path
+    assert [s.index for s in run.steps] == [0, 1, 2, 3]
+    for step in run.steps:
+        assert (wi.directory / step.prompt_path).is_file()
+        assert (wi.directory / step.output_path).is_file()
+        assert step.prompt_path.startswith("outputs/")
+        assert step.output_path.startswith("outputs/")
+
     metrics = load_metrics(wi.directory, "run-001")
     assert metrics is not None
     assert metrics.context["total_prompt_chars"] > 0

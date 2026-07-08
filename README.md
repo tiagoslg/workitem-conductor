@@ -295,6 +295,7 @@ Inspect a workitem's goal/state plus its run history:
 
 ```bash
 conductor inspect                # active workitem: state + latest run
+conductor inspect --active       # same as above, explicit form
 conductor inspect <id>           # a specific workitem
 conductor inspect --runs         # every run, not just the latest
 conductor inspect --context      # + per-step prompt/output char counts
