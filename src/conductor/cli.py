@@ -34,6 +34,7 @@ from .core.context import build_cross_project_section
 from .core.engine import Engine, GoalNotApproved, StepOutcome
 from .core.refine import Refiner
 from .core.runs import list_run_ids, load_metrics, load_run
+from .core.summarize import summarize
 from .core.workspace_engine import ProjectStepOutcome, WorkspaceEngine
 from .core.worktree import (
     branch_name as worktree_branch,
@@ -54,6 +55,7 @@ from .workitems.manager import (
     fork_workitem,
     get_active_id,
     list_workitems,
+    load_memory,
     load_workitem,
     reopen_workitem,
     save_state,
@@ -569,6 +571,20 @@ def inspect(
     )
     console.print(table)
 
+    memory = load_memory(paths, wid)
+    if memory.current_summary or memory.open_issues or memory.decisions:
+        console.print("\n[bold]Memory:[/bold]")
+        if memory.current_summary:
+            console.print(f"  {memory.current_summary.strip()}")
+        if memory.open_issues:
+            console.print("  [dim]open issues:[/dim]")
+            for issue in memory.open_issues:
+                console.print(f"    - {issue}")
+        if memory.decisions:
+            console.print("  [dim]recent decisions:[/dim]")
+            for decision in memory.decisions[-2:]:
+                console.print(f"    - {decision.decision}")
+
     run_ids = list_run_ids(wi.directory)
     if not run_ids:
         console.print("\n[dim]No runs yet — run `conductor execute`.[/dim]")
@@ -677,7 +693,10 @@ def execute(
         err_console.print(f"[red]Could not create worktree:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    engine = Engine(paths, flow, provider_for=provider_for, execution_cwd=wt_path)
+    engine = Engine(
+        paths, flow, provider_for=provider_for,
+        execution_cwd=wt_path, context_config=config.context,
+    )
 
     mode = "[yellow]dry-run[/yellow]" if dry_run else "providers from repo.yml"
     console.print(
@@ -961,7 +980,22 @@ def reopen(
         f"status=[yellow]{updated.state.status}[/yellow] "
         f"next=[bold]{updated.state.next_action}[/bold]"
     )
+    _summarize_on_reopen(paths, updated, reason)
     console.print("\nNext: [bold]conductor execute[/bold]")
+
+
+def _summarize_on_reopen(paths: AiPaths, wi, reason: str) -> None:
+    """Best-effort summarizer call right after a reopen — never blocks it.
+
+    Reopen's job (resetting state) must stay reliable even if repo.yml is
+    missing/invalid or the summarizer's provider binding fails.
+    """
+    try:
+        config = load_repo_config(paths)
+        provider_for = build_provider_for(config)
+        summarize(paths, wi, provider_for("summarizer"), "reopen", [], paths.cwd)
+    except Exception as exc:
+        console.print(f"  [dim]summarizer skipped: {exc}[/dim]")
 
 
 def _reopen_workspace(workspace: str, workitem_id: str | None, reason: str) -> None:

@@ -14,7 +14,7 @@ from datetime import date
 from pathlib import Path
 
 from ..paths import AiPaths
-from .models import GoalContract, Scope, WorkitemState
+from .models import GoalContract, MemoryRecord, Scope, WorkitemState
 
 _SLUG_MAX_WORDS = 8
 
@@ -63,6 +63,14 @@ def _goal_path(directory: Path) -> Path:
 
 def _state_path(directory: Path) -> Path:
     return directory / "state.yml"
+
+
+def _memory_path(directory: Path) -> Path:
+    return directory / "memory.yml"
+
+
+def _current_summary_path(directory: Path) -> Path:
+    return directory / "context" / "current_summary.md"
 
 
 def create_workitem(paths: AiPaths, goal: str, flow: str = "simple-change") -> Workitem:
@@ -115,6 +123,23 @@ def save_goal(paths: AiPaths, workitem_id: str, goal: GoalContract) -> None:
     """Persist ``goal`` back to its workitem's ``goal.yml``."""
     directory = paths.workitem_dir(workitem_id)
     _goal_path(directory).write_text(goal.to_yaml(), encoding="utf-8")
+
+
+def load_memory(paths: AiPaths, workitem_id: str) -> MemoryRecord:
+    """Return the workitem's curated memory, or an empty record if none yet."""
+    path = _memory_path(paths.workitem_dir(workitem_id))
+    if not path.is_file():
+        return MemoryRecord()
+    return MemoryRecord.from_yaml(path.read_text(encoding="utf-8"))
+
+
+def save_memory(paths: AiPaths, workitem_id: str, memory: MemoryRecord) -> None:
+    """Persist ``memory`` to ``memory.yml`` and a plain-text ``context/current_summary.md``."""
+    directory = paths.workitem_dir(workitem_id)
+    _memory_path(directory).write_text(memory.to_yaml(), encoding="utf-8")
+    summary_path = _current_summary_path(directory)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(memory.current_summary.strip() + "\n", encoding="utf-8")
 
 
 def approve_goal(paths: AiPaths, workitem_id: str) -> Workitem:

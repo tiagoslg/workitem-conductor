@@ -51,9 +51,17 @@ default_flow: simple-change
 #   planner:     { provider: codex_cli }
 #   implementer: { provider: codex_cli }
 #   reviewer:    { provider: claude_cli }
+#   summarizer:  { provider: codex_cli }   # updates memory.yml after each run/reopen
 #
 # refine:
 #   max_question_rounds: 5   # cap on clarifying-question rounds in `refine`
+#
+# context:
+#   max_prompt_chars: 64000       # overall prompt budget; optional sections trim first
+#   include_raw_outputs: false    # off by default — memory.yml is the curated source
+#   include_memory: true
+#   include_last_diff: true
+#   include_last_review: true
 #
 # Branch strategy (optional — defaults to current HEAD if unset):
 # source_branch: main     # worktrees are created from this branch
@@ -235,6 +243,51 @@ line. Emit one — and only one — per response, on its own line:
   enclosed in single or double quotes.
 """
 
+SUMMARIZER_MD = """\
+# Role: summarizer
+
+You curate `memory.yml` — the workitem's *current* state in your own words —
+so later steps don't need to re-read every prior raw output. You are called
+after a run finishes, stops, loops back for a fix, or is reopened.
+
+## Inputs
+- the goal contract and current state (stage/status/trigger);
+- the existing memory (if any) — your previous summary, open issues, decisions;
+- the steps that ran in this pass, and the working-tree diff so far.
+
+## Output
+
+Emit exactly one marker line, on its own line, followed by a fenced YAML block:
+
+    SUMMARY:
+    ```yaml
+    current_summary: >
+      One paragraph: what this workitem is doing and where it stands right now.
+    open_issues:
+      - Things that still need fixing, in plain language.
+    decisions:
+      - Any non-obvious call made (e.g. "kept the old field name for compat").
+    resolved_issues:
+      - Issues from the previous summary that are now fixed (leave off ones
+        still open — they belong in open_issues).
+    validation_status:
+      last_tests: []   # commands run to check the result, if any
+      failing: []       # tests/checks currently failing, if any
+    ```
+
+## Rules
+
+- `current_summary` and `open_issues` replace the previous ones — write the
+  full current picture, not a diff of what changed;
+- `decisions` and `resolved_issues` are additive history — only include *new*
+  ones since the last summary, not ones already recorded;
+- keep `current_summary` to one tight paragraph — this is what every later
+  prompt will carry forward, not a transcript;
+- **start your reply with `SUMMARY:`** — no preamble before it, it drives the parser;
+- if there is genuinely nothing new to record, still emit `SUMMARY:` with the
+  same `current_summary` as before rather than omitting the marker.
+"""
+
 WORKSPACE_CHANGE_FLOW = """\
 # Flow: workspace-change
 # Cross-project execution: planner runs once with full workspace context;
@@ -343,6 +396,7 @@ _FILES: tuple[tuple[str, str], ...] = (
     ("roles/implementer.md", IMPLEMENTER_MD),
     ("roles/reviewer.md", REVIEWER_MD),
     ("roles/refiner.md", REFINER_MD),
+    ("roles/summarizer.md", SUMMARIZER_MD),
 )
 
 

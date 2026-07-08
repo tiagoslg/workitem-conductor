@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..config.models import ContextConfig
 from ..flows.models import Flow, FlowStep
 from ..paths import AiPaths
 from ..providers.base import Provider, ProviderRequest
@@ -24,6 +25,7 @@ from . import stop_conditions
 from .context import build_context
 from .review import parse_review_verdict
 from .runs import MetricsRecord, RunRecord, StepRecord, next_run_id, write_run
+from .summarize import summarize
 from .worktree import diff_stat
 
 #: Resolves the provider to use for a given role. Built from repo.yml by the
@@ -70,11 +72,13 @@ class Engine:
         flow: Flow,
         provider_for: ProviderFor,
         execution_cwd: Path | None = None,
+        context_config: ContextConfig | None = None,
     ) -> None:
         self.paths = paths
         self.flow = flow
         self.provider_for = provider_for
         self._execution_cwd = execution_cwd or paths.cwd
+        self.context_config = context_config
 
     def run(
         self,
@@ -105,13 +109,18 @@ class Engine:
             if cap.stop:
                 self._stop(wi, outcome, cap.reason, cap.status)
                 self._write_run(wi, run_id, started_at, run_steps, outcome)
+                self._summarize(wi, "stop", run_steps)
                 return outcome
 
             step = self.flow.steps[state.step_index]
             seq = state.iterations  # global, monotonic — preserves fix history
             provider = self.provider_for(step.role)
 
-            prompt = build_context(self.paths, wi, step.role)
+            prompt = build_context(
+                self.paths, wi, step.role,
+                context_config=self.context_config,
+                execution_cwd=self._execution_cwd,
+            )
             prompt_path = outputs_dir / f"{seq:02d}-{step.role}.prompt.md"
             output_path = outputs_dir / f"{seq:02d}-{step.role}.output.md"
             prompt_path.write_text(prompt, encoding="utf-8")
@@ -170,6 +179,7 @@ class Engine:
                 if on_step:
                     on_step(step_outcome)
                 self._write_run(wi, run_id, started_at, run_steps, outcome)
+                self._summarize(wi, "stop", run_steps)
                 return outcome
 
             # Review gate: decide whether to advance or loop back to fix.
@@ -187,12 +197,14 @@ class Engine:
                         if on_step:
                             on_step(step_outcome)
                         self._write_run(wi, run_id, started_at, run_steps, outcome)
+                        self._summarize(wi, "stop", run_steps)
                         return outcome
                     self._loop_back(state, step, step_outcome)
                     run_steps[-1].looped_back = True
                     save_state(self.paths, state)
                     if on_step:
                         on_step(step_outcome)
+                    self._summarize(wi, "loop_back", run_steps)
                     continue
 
             if step.role == "planner" and result.ok:
@@ -208,6 +220,7 @@ class Engine:
 
         self._finish(wi, outcome)
         self._write_run(wi, run_id, started_at, run_steps, outcome)
+        self._summarize(wi, "finish", run_steps)
         return outcome
 
     def _loop_back(self, state: WorkitemState, step: FlowStep, outcome: StepOutcome) -> None:
@@ -293,6 +306,21 @@ class Engine:
             providers=providers,
         )
         write_run(wi.directory, run, metrics)
+
+    def _summarize(self, wi: Workitem, trigger: str, run_steps: list[StepRecord]) -> None:
+        """Best-effort call to the ``summarizer`` role to update ``memory.yml``.
+
+        Never allowed to break a run: an unbound/dry-run summarizer simply
+        makes no proposal (handled inside ``summarize()``), and any exception
+        here (a real provider erroring, a malformed binding) is caught and
+        recorded in history rather than propagated.
+        """
+        try:
+            provider = self.provider_for("summarizer")
+            summarize(self.paths, wi, provider, trigger, run_steps, self._execution_cwd)
+        except Exception as exc:  # summarization must never break the run
+            wi.state.record(f"summarizer skipped: {exc}")
+            save_state(self.paths, wi.state)
 
 
 def _build_final_report(wi: Workitem, flow: Flow, outcome: RunOutcome) -> str:

@@ -15,6 +15,7 @@ EXPECTED = {
     "roles/implementer.md",
     "roles/reviewer.md",
     "roles/refiner.md",
+    "roles/summarizer.md",
 }
 
 

@@ -307,6 +307,46 @@ It also shows a live `git diff --stat` of the worktree, if one still exists
 Single-repo execution only for now — `-w` (workspace) runs don't yet write
 run/metrics manifests.
 
+## Memory and curated context
+
+Resending every prior step's raw output on every reopen grows the prompt
+without bound. Instead, a `summarizer` role curates `memory.yml` — the
+workitem's *current* state in its own words — and later prompts read that
+instead:
+
+```
+memory.yml               # current_summary, open_issues, decisions, resolved_issues
+context/current_summary.md   # plain-text copy of current_summary, for humans
+```
+
+The summarizer runs automatically (bind it in `repo.yml` like any other role;
+unbound = silent no-op, not an error) after a run finishes, stops/blocks,
+loops back for a fix, or is reopened — each time reading the goal, prior
+memory, the steps that just ran, and the working-tree diff, then emitting one
+`SUMMARY:` block (same "one marker" convention as the reviewer's `REVIEW:`
+verdict and the refiner's `CONTRACT:`).
+
+By default, `build_context()` assembles each prompt from curated sources —
+memory, a working-tree diff, and just the latest reviewer output — instead of
+every role's raw prior output. Control this in `repo.yml`:
+
+```yaml
+context:
+  max_prompt_chars: 64000     # optional sections trim from the tail first
+  include_raw_outputs: false  # opt-in — turn on if you don't yet trust the summarizer
+  include_memory: true
+  include_last_diff: true
+  include_last_review: true
+```
+
+`conductor reopen` also triggers the summarizer immediately (wrapped so a
+failing/unbound summarizer never blocks the reopen itself — resetting state
+has to stay reliable). `conductor inspect` shows the current memory alongside
+run history.
+
+Single-repo only for now — workspace (`-w`) execution/reopen don't get
+curated context or summarization yet.
+
 ## Cross-project workitems and workspace execution
 
 ### Defining cross-project workitems
@@ -450,6 +490,14 @@ across projects).
   (aggregated context size, git diff stats, fix/reopen counts, providers
   used), plus `conductor inspect` to view them alongside goal/state. Single-repo
   execution only for now — workspace (`-w`) runs are a fast-follow.
+- **Memory, summarizer role, curated context** — a `summarizer` role curates
+  `memory.yml`/`context/current_summary.md` after each run finish/stop/loop-back
+  and `reopen`; `build_context()` now assembles prompts from that curated
+  memory (plus a working-tree diff and the latest reviewer output) instead of
+  every role's raw prior output by default, under an explicit
+  `context.max_prompt_chars` budget. Raw-output inclusion stays available as
+  an opt-in for repos not yet trusting their summarizer. Single-repo only for
+  now — workspace (`-w`) execution/reopen are a fast-follow.
 
 ### Track A — execution
 

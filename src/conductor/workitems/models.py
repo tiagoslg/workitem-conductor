@@ -147,3 +147,39 @@ class WorkitemState(BaseModel):
     @classmethod
     def from_yaml(cls, text: str) -> "WorkitemState":
         return cls.model_validate(yaml.safe_load(text) or {})
+
+
+class Decision(BaseModel):
+    """A recorded decision — most often written by the summarizer role."""
+
+    at: str = Field(default_factory=utcnow_iso)
+    by: str = "summarizer"
+    decision: str
+
+
+class ValidationStatus(BaseModel):
+    last_tests: list[str] = Field(default_factory=list)
+    failing: list[str] = Field(default_factory=list)
+
+
+class MemoryRecord(BaseModel):
+    """Curated, human/LLM-written state of a workitem — the antidote to
+    resending every prior raw output on each reopen (see ``core/context.py``).
+
+    ``current_summary`` and ``open_issues`` represent *current* state and are
+    replaced wholesale on each update; ``decisions``/``resolved_issues`` are
+    an append-only history (see ``core/summarize.py::merge_memory``).
+    """
+
+    current_summary: str = ""
+    decisions: list[Decision] = Field(default_factory=list)
+    open_issues: list[str] = Field(default_factory=list)
+    resolved_issues: list[str] = Field(default_factory=list)
+    validation_status: ValidationStatus = Field(default_factory=ValidationStatus)
+
+    def to_yaml(self) -> str:
+        return _dump_yaml(self.model_dump())
+
+    @classmethod
+    def from_yaml(cls, text: str) -> "MemoryRecord":
+        return cls.model_validate(yaml.safe_load(text) or {})

@@ -3,13 +3,14 @@ from pathlib import Path
 
 import pytest
 
+from conductor.config.models import ContextConfig
 from conductor.core.engine import Engine, GoalNotApproved
 from conductor.flows.loader import FlowNotFound, load_flow
 from conductor.paths import AiPaths
 from conductor.providers.base import ProviderRequest, ProviderResult
 from conductor.providers.dryrun import DryRunProvider
 from conductor.scaffold import scaffold_ai
-from conductor.workitems.manager import approve_goal, create_workitem, load_workitem
+from conductor.workitems.manager import approve_goal, create_workitem, load_memory, load_workitem
 
 
 @pytest.fixture
@@ -92,7 +93,10 @@ def test_engine_later_step_sees_prior_output(paths: AiPaths):
     wi = create_workitem(paths, "context flows forward")
     approve_goal(paths, wi.workitem_id)
     flow = load_flow(paths, "simple-change")
-    engine = Engine(paths, flow, provider_for=lambda role: DryRunProvider())
+    engine = Engine(
+        paths, flow, provider_for=lambda role: DryRunProvider(),
+        context_config=ContextConfig(include_raw_outputs=True),
+    )
     engine.run(wi.workitem_id)
 
     # the implementer's prompt should embed the planner's prior output
@@ -229,3 +233,97 @@ def test_branch_marker_ignores_extra_whitespace():
     m = _BRANCH_RE.search(output)
     assert m is not None
     assert m.group(1).strip() == "feat/my-feature"
+
+
+# --- summarizer trigger points ---
+
+class _CountingSummaryProvider(DryRunProvider):
+    name = "counting_summarizer"
+
+    def __init__(self):
+        self.calls = 0
+
+    def run(self, request):
+        self.calls += 1
+        return ProviderResult(
+            ok=True,
+            output=f"SUMMARY:\n```yaml\ncurrent_summary: call {self.calls}\n```\n",
+            provider=self.name,
+        )
+
+
+def test_summarizer_called_on_finish(paths: AiPaths):
+    wi = create_workitem(paths, "summarize on finish")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    summarizer = _CountingSummaryProvider()
+
+    def provider_for(role):
+        return summarizer if role == "summarizer" else DryRunProvider()
+
+    engine = Engine(paths, flow, provider_for=provider_for)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is True
+    assert summarizer.calls == 1
+    assert load_memory(paths, wi.workitem_id).current_summary == "call 1"
+
+
+def test_summarizer_called_on_stop(paths: AiPaths):
+    wi = create_workitem(paths, "summarize on stop")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    summarizer = _CountingSummaryProvider()
+
+    class FailingProvider(DryRunProvider):
+        def run(self, request):
+            return ProviderResult(ok=False, output="", provider="failing", error="boom")
+
+    def provider_for(role):
+        return summarizer if role == "summarizer" else FailingProvider()
+
+    engine = Engine(paths, flow, provider_for=provider_for)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is False
+    assert summarizer.calls == 1
+    assert load_memory(paths, wi.workitem_id).current_summary == "call 1"
+
+
+def test_summarizer_called_on_each_loop_back(paths: AiPaths):
+    wi = create_workitem(paths, "summarize on loop back")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    reviewer = ScriptedReviewer(["changes_requested", "changes_requested", "approved"])
+    summarizer = _CountingSummaryProvider()
+
+    def provider_for(role):
+        return summarizer if role == "summarizer" else reviewer
+
+    engine = Engine(paths, flow, provider_for=provider_for)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is True
+    # 2 loop-backs (changes_requested x2) + 1 final finish
+    assert summarizer.calls == 3
+
+
+def test_summarizer_failure_does_not_break_run(paths: AiPaths):
+    """A broken summarizer binding must not prevent the run from completing."""
+    wi = create_workitem(paths, "summarizer explodes")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+
+    class ExplodingSummarizer(DryRunProvider):
+        def run(self, request):
+            raise RuntimeError("summarizer provider is broken")
+
+    def provider_for(role):
+        return ExplodingSummarizer() if role == "summarizer" else DryRunProvider()
+
+    engine = Engine(paths, flow, provider_for=provider_for)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is True
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert any("summarizer skipped" in h.summary for h in reloaded.state.history)

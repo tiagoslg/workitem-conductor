@@ -443,6 +443,26 @@ next action
 
 Resolver o problema de explosão de contexto em workitems medianos com vários reopens.
 
+## Estado (2026-07-08): implementado — itens 24-30 concluídos
+
+Ao contrário do M3/M4 (que fizeram cortes propositadamente mais cautelosos),
+aqui foi feito o corte completo já nesta fase, por decisão explícita:
+
+- **Item 20 (M4) não foi revisitado** — `outputs/NN-role.*.md` continua flat,
+  `run.yml` continua a ser manifesto, não cópia física.
+- **`build_context()` deixou de incluir raw outputs por omissão** —
+  `include_raw_outputs: false` é agora o default; memory.yml passa a ser a
+  fonte de contexto por omissão (`include_memory`, `include_last_diff`,
+  `include_last_review` todos `true` por omissão). Raw outputs continuam
+  disponíveis como opt-in explícito em `repo.yml` (`context.include_raw_outputs: true`)
+  para repos que ainda não confiem no summarizer.
+- **`conductor reopen` também dispara o summarizer** — resolve um provider
+  como `execute`/`refine` já faziam, envolto em try/except para nunca
+  bloquear o reopen (o reset de estado tem de continuar fiável mesmo com
+  summarizer mal configurado ou provider a falhar).
+- **Fora de escopo, mesmo padrão do M3/M4**: `WorkspaceEngine`/`conductor
+  reopen -w` não têm summarizer nem contexto curado nesta fase.
+
 ## Itens
 
 ### 24. Criar `memory.yml`
