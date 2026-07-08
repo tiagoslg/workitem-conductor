@@ -158,6 +158,17 @@ def test_reopen_overwrites_previous_reopen_md(paths: AiPaths):
     assert reopen_file.read_text(encoding="utf-8") == "second reason"
 
 
+def test_reopen_increments_reopen_count(paths: AiPaths):
+    wi = create_workitem(paths, "count reopens")
+    assert load_workitem(paths, wi.workitem_id).state.reopen_count == 0
+
+    first = reopen_workitem(paths, wi.workitem_id, "first reason")
+    assert first.state.reopen_count == 1
+
+    second = reopen_workitem(paths, wi.workitem_id, "second reason")
+    assert second.state.reopen_count == 2
+
+
 def test_save_and_load_state(paths: AiPaths):
     wi = create_workitem(paths, "stateful goal")
     wi.state.status = "ready"

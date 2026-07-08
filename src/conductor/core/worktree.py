@@ -9,15 +9,56 @@ temporary working space, cleaned up on accept or reopen.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 from ..paths import AiPaths
 
+_SHORTSTAT_RE = re.compile(
+    r"(\d+) files? changed"
+    r"(?:, (\d+) insertions?\(\+\))?"
+    r"(?:, (\d+) deletions?\(-\))?"
+)
+
 
 def branch_name(workitem_id: str) -> str:
     return f"conductor/{workitem_id}"
+
+
+def diff_stat(cwd: Path) -> dict | None:
+    """Best-effort ``{files_changed, insertions, deletions}`` for ``cwd``, or ``None``.
+
+    Stages everything first (``git add -A``) so untracked files are counted —
+    harmless even mid-execution, since ``accept`` stages everything again
+    itself. Returns ``None`` on any failure (not a git repo, no git binary,
+    ``cwd`` missing) rather than raising — this is metrics, never load-bearing.
+    """
+    if not cwd.is_dir():
+        return None
+    try:
+        add = subprocess.run(
+            ["git", "add", "-A"], cwd=cwd, capture_output=True, text=True,
+        )
+        if add.returncode != 0:
+            return None
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--shortstat"],
+            cwd=cwd, capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    m = _SHORTSTAT_RE.search(result.stdout)
+    if not m:
+        return {"files_changed": 0, "insertions": 0, "deletions": 0}
+    return {
+        "files_changed": int(m.group(1)),
+        "insertions": int(m.group(2) or 0),
+        "deletions": int(m.group(3) or 0),
+    }
 
 
 def worktree_path(paths: AiPaths, workitem_id: str) -> Path:

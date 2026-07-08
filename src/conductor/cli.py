@@ -33,6 +33,7 @@ from .config.models import ProviderConfig, RepoConfig, RoleBinding
 from .core.context import build_cross_project_section
 from .core.engine import Engine, GoalNotApproved, StepOutcome
 from .core.refine import Refiner
+from .core.runs import list_run_ids, load_metrics, load_run
 from .core.workspace_engine import ProjectStepOutcome, WorkspaceEngine
 from .core.worktree import (
     branch_name as worktree_branch,
@@ -488,6 +489,121 @@ def status(
             "\n[dim]Goal not approved yet — refine goal.yml, then run "
             "`conductor approve`.[/dim]"
         )
+
+
+def _print_run_summary(run) -> None:
+    table = Table(title=f"{run.run_id} · {run.status}")
+    table.add_column("role", style="bold")
+    table.add_column("provider")
+    table.add_column("ok", justify="center")
+    table.add_column("duration")
+    table.add_column("verdict")
+    for step in run.steps:
+        ok_mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
+        table.add_row(
+            step.role, step.provider, ok_mark,
+            f"{step.duration_sec:.1f}s", step.verdict or "",
+        )
+    console.print(table)
+    console.print(f"  [dim]{run.started_at} → {run.finished_at}[/dim]")
+    if run.stopped_reason:
+        console.print(f"  [yellow]stopped:[/yellow] {run.stopped_reason}")
+
+
+@app.command()
+def inspect(
+    workitem_id: str = typer.Argument(
+        None, help="Workitem to inspect (defaults to the active one)."
+    ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w", help="Inspect a workitem from this workspace."
+    ),
+    runs: bool = typer.Option(
+        False, "--runs", help="List every run instead of just the latest."
+    ),
+    context: bool = typer.Option(
+        False, "--context", help="Show the latest run's per-step context sizes."
+    ),
+) -> None:
+    """Show a workitem's goal/state plus its run history and metrics."""
+    paths = _load_ws_paths(workspace) if workspace else _load_paths()
+    wid = workitem_id or get_active_id(paths)
+    if wid is None:
+        err_console.print(
+            "[red]No workitem to inspect.[/red]  Run `conductor define \"<goal>\"` first."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    state = wi.state
+    table = Table(show_header=False, title=f"Workitem: {wi.workitem_id}")
+    table.add_column("field", style="dim")
+    table.add_column("value")
+    table.add_row("title", state.title)
+    table.add_row("flow", state.flow)
+    table.add_row("stage", f"[cyan]{state.stage}[/cyan]")
+    table.add_row("status", f"[yellow]{state.status}[/yellow]")
+    table.add_row("next action", state.next_action)
+    table.add_row("iterations", str(state.iterations))
+    table.add_row("fix iterations", str(state.fix_iterations))
+    table.add_row("reopen count", str(state.reopen_count))
+    if state.feature_branch:
+        table.add_row("feature branch", state.feature_branch)
+    table.add_row(
+        "open issues",
+        "\n".join(f"- {i}" for i in state.open_issues) or "[dim]none[/dim]",
+    )
+    console.print(table)
+
+    run_ids = list_run_ids(wi.directory)
+    if not run_ids:
+        console.print("\n[dim]No runs yet — run `conductor execute`.[/dim]")
+        return
+
+    console.print()
+    ids_to_show = run_ids if runs else run_ids[-1:]
+    for run_id in ids_to_show:
+        run = load_run(wi.directory, run_id)
+        _print_run_summary(run)
+
+        metrics = load_metrics(wi.directory, run_id)
+        if metrics is not None:
+            ctx = metrics.context
+            console.print(
+                f"  [dim]context: {ctx.get('total_prompt_chars', 0)} chars total, "
+                f"{ctx.get('max_step_prompt_chars', 0)} max/step[/dim]"
+            )
+            if metrics.git is not None:
+                g = metrics.git
+                console.print(
+                    f"  [dim]git: {g['files_changed']} files, "
+                    f"+{g['insertions']}/-{g['deletions']}[/dim]"
+                )
+        if context:
+            for step in run.steps:
+                console.print(
+                    f"    [dim]{step.role}: prompt {step.prompt_chars} chars, "
+                    f"output {step.output_chars} chars[/dim]"
+                )
+        console.print()
+
+    wt_path = worktree_path(paths, wid)
+    if wt_path.is_dir():
+        diff = subprocess.run(
+            ["git", "diff", "--stat"], cwd=wt_path, capture_output=True, text=True,
+        )
+        if diff.returncode == 0 and diff.stdout.strip():
+            console.print("[bold]Working tree diff:[/bold]")
+            console.print(diff.stdout.rstrip())
+        else:
+            console.print("[dim]Worktree has no uncommitted changes.[/dim]")
+    else:
+        console.print("[dim]No worktree present (accepted or reopened away).[/dim]")
 
 
 @app.command()

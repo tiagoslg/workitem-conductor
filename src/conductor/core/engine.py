@@ -10,6 +10,7 @@ loop) until the reviewer approves or a stop condition is hit.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,8 @@ from ..workitems.models import WorkitemState, utcnow_iso
 from . import stop_conditions
 from .context import build_context
 from .review import parse_review_verdict
+from .runs import MetricsRecord, RunRecord, StepRecord, next_run_id, write_run
+from .worktree import diff_stat
 
 #: Resolves the provider to use for a given role. Built from repo.yml by the
 #: registry; the engine depends only on this callable, not on any backend.
@@ -89,6 +92,10 @@ class Engine:
         outputs_dir.mkdir(parents=True, exist_ok=True)
         outcome = RunOutcome(workitem_id=workitem_id)
 
+        run_id = next_run_id(wi.directory)
+        started_at = utcnow_iso()
+        run_steps: list[StepRecord] = []
+
         state.status = "running"
         save_state(self.paths, state)
 
@@ -97,6 +104,7 @@ class Engine:
             cap = stop_conditions.check_global_cap(state.iterations)
             if cap.stop:
                 self._stop(wi, outcome, cap.reason, cap.status)
+                self._write_run(wi, run_id, started_at, run_steps, outcome)
                 return outcome
 
             step = self.flow.steps[state.step_index]
@@ -109,6 +117,7 @@ class Engine:
             prompt_path.write_text(prompt, encoding="utf-8")
             if on_step_start:
                 on_step_start(step.role, provider.name)
+            t0 = time.monotonic()
             result = provider.run(
                 ProviderRequest(
                     role=step.role,
@@ -118,6 +127,7 @@ class Engine:
                     on_output=on_step_output,
                 )
             )
+            duration_sec = time.monotonic() - t0
             output_path.write_text(result.output, encoding="utf-8")
 
             step_outcome = StepOutcome(
@@ -131,6 +141,16 @@ class Engine:
                 error=result.error,
             )
             outcome.steps.append(step_outcome)
+            run_steps.append(
+                StepRecord(
+                    role=step.role,
+                    provider=result.provider,
+                    ok=result.ok,
+                    duration_sec=round(duration_sec, 2),
+                    prompt_chars=len(prompt),
+                    output_chars=len(result.output),
+                )
+            )
 
             state.artifacts[step.role] = output_path.relative_to(wi.directory).as_posix()
             state.stage = step.stage
@@ -146,12 +166,14 @@ class Engine:
                 )
                 if on_step:
                     on_step(step_outcome)
+                self._write_run(wi, run_id, started_at, run_steps, outcome)
                 return outcome
 
             # Review gate: decide whether to advance or loop back to fix.
             if step.gate == "review":
                 verdict = parse_review_verdict(result.output)
                 step_outcome.verdict = verdict
+                run_steps[-1].verdict = verdict
                 if verdict == "changes_requested":
                     decision = stop_conditions.check_max_fix_iterations(
                         state.fix_iterations, self.flow.max_fix_iterations
@@ -161,8 +183,10 @@ class Engine:
                         self._stop(wi, outcome, decision.reason, decision.status)
                         if on_step:
                             on_step(step_outcome)
+                        self._write_run(wi, run_id, started_at, run_steps, outcome)
                         return outcome
                     self._loop_back(state, step, step_outcome)
+                    run_steps[-1].looped_back = True
                     save_state(self.paths, state)
                     if on_step:
                         on_step(step_outcome)
@@ -180,6 +204,7 @@ class Engine:
                 on_step(step_outcome)
 
         self._finish(wi, outcome)
+        self._write_run(wi, run_id, started_at, run_steps, outcome)
         return outcome
 
     def _loop_back(self, state: WorkitemState, step: FlowStep, outcome: StepOutcome) -> None:
@@ -223,6 +248,48 @@ class Engine:
         state.next_action = "none"
         state.record("flow completed; final report ready for human review")
         save_state(self.paths, state)
+
+    def _write_run(
+        self,
+        wi: Workitem,
+        run_id: str,
+        started_at: str,
+        run_steps: list[StepRecord],
+        outcome: RunOutcome,
+    ) -> None:
+        """Write this run's manifest and aggregated metrics.
+
+        Best-effort: git stats fall back to ``None`` when ``execution_cwd``
+        isn't a git repo (true for most unit tests, which run with dry-run
+        providers against a bare tmp dir).
+        """
+        state = wi.state
+        run = RunRecord(
+            run_id=run_id,
+            workitem_id=wi.workitem_id,
+            started_at=started_at,
+            finished_at=utcnow_iso(),
+            status=state.status,
+            flow=self.flow.name,
+            reopen_number=state.reopen_count,
+            stopped_reason=outcome.stopped_reason,
+            steps=run_steps,
+        )
+        prompt_chars = [s.prompt_chars for s in run_steps]
+        providers = {s.role: s.provider for s in run_steps}
+        metrics = MetricsRecord(
+            context={
+                "total_prompt_chars": sum(prompt_chars),
+                "max_step_prompt_chars": max(prompt_chars, default=0),
+            },
+            git=diff_stat(self._execution_cwd),
+            loop={
+                "fix_iterations": state.fix_iterations,
+                "reopen_number": state.reopen_count,
+            },
+            providers=providers,
+        )
+        write_run(wi.directory, run, metrics)
 
 
 def _build_final_report(wi: Workitem, flow: Flow, outcome: RunOutcome) -> str:

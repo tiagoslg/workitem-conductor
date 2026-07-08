@@ -126,6 +126,7 @@ class WorkitemState(BaseModel):
     step_index: int = 0
     iterations: int = 0
     fix_iterations: int = 0
+    reopen_count: int = 0
     feature_branch: str | None = None
     open_issues: list[str] = Field(default_factory=list)
     human_overrides: list[str] = Field(default_factory=list)

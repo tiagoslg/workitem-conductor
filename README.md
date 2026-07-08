@@ -53,6 +53,7 @@ conductor approve                   # mark the goal approved & ready to execute
 conductor status                    # show the active workitem
 conductor execute                   # run the flow end-to-end
 conductor execute --stream          # same, but stream provider output live
+conductor inspect                   # state + run history/metrics; see below
 conductor accept                    # commit the result; see "Git workflow" below
 conductor doctor                    # check prerequisites and provider CLIs
 ```
@@ -274,6 +275,37 @@ Prompt files for each step are written to the workitem's `outputs/` directory
 the provider runs, so you can inspect what was sent to the model while it's
 thinking.
 
+## Runs, metrics and `conductor inspect`
+
+Every `conductor execute` call is a **run**. Each run writes a manifest under
+the workitem's directory:
+
+```
+runs/run-001/
+  run.yml       # per-step provider/duration/verdict, started/finished, status
+  metrics.yml   # aggregated: context size, git diff stats, fix/reopen counts, providers used
+```
+
+`run.yml` references the existing `outputs/NN-role.*.md` files rather than
+duplicating them — a run is a record of *what happened*, not a copy of the
+artifacts. `metrics.yml`'s git stats (`files_changed`/`insertions`/`deletions`)
+are best-effort: `None` when the execution directory isn't a git repo.
+
+Inspect a workitem's goal/state plus its run history:
+
+```bash
+conductor inspect                # active workitem: state + latest run
+conductor inspect <id>           # a specific workitem
+conductor inspect --runs         # every run, not just the latest
+conductor inspect --context      # + per-step prompt/output char counts
+```
+
+It also shows a live `git diff --stat` of the worktree, if one still exists
+(reopened/accepted workitems won't have one).
+
+Single-repo execution only for now — `-w` (workspace) runs don't yet write
+run/metrics manifests.
+
 ## Cross-project workitems and workspace execution
 
 ### Defining cross-project workitems
@@ -412,6 +444,11 @@ across projects).
   state moved to `~/.local/share/conductor/workspaces/<name>/`. First step
   toward treating workitems as a first-class concept the conductor owns, ahead
   of runs/metrics/memory work.
+- **Runs and metrics** — every `execute` writes `runs/<id>/run.yml` (per-step
+  provider, duration, char counts, verdict) and `runs/<id>/metrics.yml`
+  (aggregated context size, git diff stats, fix/reopen counts, providers
+  used), plus `conductor inspect` to view them alongside goal/state. Single-repo
+  execution only for now — workspace (`-w`) runs are a fast-follow.
 
 ### Track A — execution
 
