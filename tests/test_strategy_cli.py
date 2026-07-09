@@ -192,3 +192,17 @@ def test_strategy_max_fix_iterations_overrides_flow_default(git_paths: AiPaths, 
     assert wi.state.fix_iterations == 1
     assert wi.state.stop_reason is not None
     assert wi.state.stop_reason.type == "fix_loop_exhausted"
+
+
+def test_define_rejects_strategy_with_workspace(paths: AiPaths, monkeypatch):
+    monkeypatch.chdir(paths.root.parent)
+    result = runner.invoke(app, ["define", "cross-project change", "-w", "default", "--strategy", "bugfix"])
+    assert result.exit_code == 1
+    assert "single-repo only" in result.output.lower()
+
+
+def test_approve_rejects_strategy_with_workspace(paths: AiPaths, monkeypatch):
+    monkeypatch.chdir(paths.root.parent)
+    result = runner.invoke(app, ["approve", "-w", "default", "--strategy", "bugfix"])
+    assert result.exit_code == 1
+    assert "single-repo only" in result.output.lower()

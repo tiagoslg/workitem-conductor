@@ -836,6 +836,12 @@ Cada run deve guardar a versão/hash da strategy usada.
   `reopen_workitem()` vai direto para `status=ready`/`next_action=execute`
   sem passar por `approve` — não há ponto de reseleção depois de um reopen
   sem mexer na própria semântica do reopen, o que ficou fora de escopo.
+- **Correção pós-review:** a primeira versão aceitava `--strategy` em
+  `define -w`/`approve -w` silenciosamente sem qualquer efeito — exatamente
+  o tipo de "silently dropped" que o M7 tentou evitar em todos os outros
+  pontos. Corrigido: `--strategy` combinado com `-w` agora falha logo com
+  uma mensagem clara ("strategies are single-repo only for now") em vez de
+  ser aceite e ignorado.
 - **Quando o selector corre (decisão confirmada com o utilizador):** em
   `define` (quase sempre dá `simple-change`, porque `acceptance_criteria`
   ainda está vazio) e outra vez em `approve` (a avaliação que importa, já

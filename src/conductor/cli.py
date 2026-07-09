@@ -286,6 +286,13 @@ def define(
         )
         raise typer.Exit(code=1)
 
+    if workspace and strategy:
+        err_console.print(
+            "[red]--strategy is single-repo only for now[/red] — WorkspaceEngine "
+            "doesn't select a strategy yet, so `--strategy` has no effect with -w."
+        )
+        raise typer.Exit(code=1)
+
     if workspace:
         paths = _load_ws_paths(workspace)
         workitem = create_workitem(paths, goal, flow="workspace-analysis")
@@ -328,6 +335,13 @@ def approve(
     ),
 ) -> None:
     """Approve the goal contract and mark the workitem ready to execute."""
+    if workspace and strategy:
+        err_console.print(
+            "[red]--strategy is single-repo only for now[/red] — WorkspaceEngine "
+            "doesn't select a strategy yet, so `--strategy` has no effect with -w."
+        )
+        raise typer.Exit(code=1)
+
     paths = _load_ws_paths(workspace) if workspace else _load_paths()
     wid = workitem_id or get_active_id(paths)
     if wid is None:

@@ -229,7 +229,9 @@ than silently: `target_projects > 1 -> cross-project-change` (workspace
 workitems don't call the selector — `conductor execute -w` still hardcodes
 its own flow) and `reopen_count >= 2 -> context-heavy-change` (`conductor
 reopen` goes straight back to ready-to-execute without an `approve` step, so
-there's no point to reselect from yet).
+there's no point to reselect from yet). `--strategy` is rejected outright
+with `-w` (`define -w ... --strategy ...` / `approve -w ... --strategy ...`
+both exit with an error) rather than silently accepted and ignored.
 
 ## Git workflow
 
