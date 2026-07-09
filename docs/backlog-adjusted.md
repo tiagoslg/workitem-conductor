@@ -640,6 +640,43 @@ what next action
 
 ---
 
+## Estado (2026-07-09): implementado — itens 31-34 concluídos
+
+- **Item 31 — detecção via marker `STOP:` declarado pelo LLM.** Convenção
+  igual a `REVIEW:`/`SUMMARY:`: qualquer role (planner/implementer/reviewer)
+  pode emitir `STOP: scope_change|secrets_access|dangerous_command|production_access`
+  em qualquer step. O motor (`core/engine.py`) verifica isto em **todo** step
+  bem-sucedido, antes da lógica de gate de review — um `STOP:` tem prioridade
+  sobre um `REVIEW:` presente no mesmo output. **Decisão de scope confirmada
+  com o utilizador:** detecção determinística de loop repetitivo /
+  deadlock reviewer-implementer foi **deliberadamente adiada** — não faz
+  parte deste milestone. `max_fix_iterations` continua a ser o único
+  backstop para um fix loop preso.
+- **Item 32 — `StopReason` estruturado.** Novo modelo em `workitems/models.py`
+  (`type`/`message`/`evidence`), partilhado por `WorkitemState.stop_reason` e
+  `RunRecord.stop_reason` (renomeado de `stopped_reason: str`) — uma única
+  fonte de verdade, evitando o risco de deriva entre uma string de exibição e
+  um campo estruturado (o mesmo risco que o reviewer do M4 tinha assinalado).
+- **Item 33 — `blocked` vs `needs_human` formalizado.** `stop_conditions.status_for()`
+  é agora o único ponto que decide o status: `provider_error` → `blocked`
+  (falha técnica); tudo o resto (`scope_change`, `secrets_access`,
+  `dangerous_command`, `production_access`, `global_cap`,
+  `fix_loop_exhausted`) → `needs_human` (decisão/risco/desvio semântico). Esta
+  distinção já existia de forma implícita antes do M6; agora está centralizada
+  numa função em vez de strings `"blocked"`/`"needs_human"` espalhadas pelos
+  vários call sites.
+- **Item 34 — `inspect`/final report mostram why/evidence/next.** `conductor
+  inspect` e o relatório final (`_build_final_report`) mostram tipo,
+  mensagem e evidence bullets; `inspect` acrescenta uma linha "next" a
+  sugerir `conductor reopen`.
+- **`WorkspaceEngine` não foi tocado** — mesma precedência "single-repo
+  first" do M3-M5. `core/stop_conditions.py::StopDecision` mantém
+  propriedades `.reason`/`.status` de compatibilidade (computadas a partir de
+  `.stop_reason`) exatamente para que `core/workspace_engine.py` continue a
+  funcionar sem alterações.
+
+---
+
 # M7 — Strategy Model and Strategy Selector
 
 ## Objetivo

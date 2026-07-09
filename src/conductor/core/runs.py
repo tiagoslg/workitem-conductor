@@ -15,6 +15,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
+from ..workitems.models import StopReason
+
 _RUN_DIRNAME_RE = re.compile(r"^run-(\d+)$")
 
 
@@ -42,7 +44,7 @@ class RunRecord(BaseModel):
     flow: str
     source: str = "execute"
     reopen_number: int = 0
-    stopped_reason: str | None = None
+    stop_reason: StopReason | None = None
     steps: list[StepRecord] = Field(default_factory=list)
 
     def to_yaml(self) -> str:

@@ -17,6 +17,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape as _escape_markup
 from rich.status import Status as _RichStatus
 from rich.table import Table
 
@@ -494,6 +495,18 @@ def status(
         )
 
 
+def _print_stop_reason(sr, *, indent: str = "  ") -> None:
+    """Print a ``StopReason`` — escaped, since its type/message/evidence come
+    from LLM output and may contain literal ``[...]`` that Rich would
+    otherwise try to interpret as markup."""
+    console.print(
+        f"{indent}[yellow]stopped:[/yellow] "
+        f"({_escape_markup(sr.type)}) {_escape_markup(sr.message)}"
+    )
+    for evidence in sr.evidence:
+        console.print(f"{indent}  [dim]-[/dim] {_escape_markup(evidence)}")
+
+
 def _print_run_summary(run) -> None:
     table = Table(title=f"{run.run_id} · {run.status}")
     table.add_column("role", style="bold")
@@ -509,8 +522,8 @@ def _print_run_summary(run) -> None:
         )
     console.print(table)
     console.print(f"  [dim]{run.started_at} → {run.finished_at}[/dim]")
-    if run.stopped_reason:
-        console.print(f"  [yellow]stopped:[/yellow] {run.stopped_reason}")
+    if run.stop_reason:
+        _print_stop_reason(run.stop_reason)
 
 
 @app.command()
@@ -570,6 +583,13 @@ def inspect(
         "\n".join(f"- {i}" for i in state.open_issues) or "[dim]none[/dim]",
     )
     console.print(table)
+
+    if state.stop_reason:
+        console.print()
+        _print_stop_reason(state.stop_reason)
+        console.print(
+            '  [dim]next:[/dim] resolve, then `conductor reopen "<what changed>"`'
+        )
 
     memory = load_memory(paths, wid)
     validation = memory.validation_status
@@ -780,7 +800,8 @@ def execute(
         )
         console.print("Review it, then accept or reopen the workitem.")
     else:
-        console.print(f"\n[yellow]Stopped:[/yellow] {outcome.stopped_reason}")
+        console.print()
+        _print_stop_reason(outcome.stopped_reason, indent="")
         raise typer.Exit(code=1)
 
 

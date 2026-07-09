@@ -20,11 +20,12 @@ from ..flows.models import Flow, FlowStep
 from ..paths import AiPaths
 from ..providers.base import Provider, ProviderRequest
 from ..workitems.manager import Workitem, load_workitem, save_state
-from ..workitems.models import WorkitemState, utcnow_iso
+from ..workitems.models import StopReason, WorkitemState, utcnow_iso
 from . import stop_conditions
 from .context import build_context
 from .review import parse_review_verdict
 from .runs import MetricsRecord, RunRecord, StepRecord, next_run_id, write_run
+from .stop_conditions import parse_stop_signal
 from .summarize import summarize
 from .worktree import diff_stat
 
@@ -62,7 +63,7 @@ class RunOutcome:
     workitem_id: str
     steps: list[StepOutcome] = field(default_factory=list)
     completed: bool = False
-    stopped_reason: str | None = None
+    stopped_reason: StopReason | None = None
 
 
 class Engine:
@@ -107,7 +108,7 @@ class Engine:
             # Backstop against a runaway loop, independent of fix iterations.
             cap = stop_conditions.check_global_cap(state.iterations)
             if cap.stop:
-                self._stop(wi, outcome, cap.reason, cap.status)
+                self._stop(wi, outcome, cap.stop_reason)
                 self._write_run(wi, run_id, started_at, run_steps, outcome)
                 self._summarize(wi, "stop", run_steps)
                 return outcome
@@ -172,10 +173,24 @@ class Engine:
                 self._stop(
                     wi,
                     outcome,
-                    f"provider failed at step '{step.role}': "
-                    f"{result.error or 'unknown error'}",
-                    status="blocked",
+                    StopReason(
+                        type="provider_error",
+                        message=f"provider failed at step '{step.role}': "
+                        f"{result.error or 'unknown error'}",
+                    ),
                 )
+                if on_step:
+                    on_step(step_outcome)
+                self._write_run(wi, run_id, started_at, run_steps, outcome)
+                self._summarize(wi, "stop", run_steps)
+                return outcome
+
+            # A role can raise a semantic safety stop (scope change, secrets
+            # access, a dangerous command, production access) on any step —
+            # this takes priority over review-gate logic on the same output.
+            stop_signal = parse_stop_signal(result.output)
+            if stop_signal is not None:
+                self._stop(wi, outcome, stop_signal)
                 if on_step:
                     on_step(step_outcome)
                 self._write_run(wi, run_id, started_at, run_steps, outcome)
@@ -192,8 +207,8 @@ class Engine:
                         state.fix_iterations, self.flow.max_fix_iterations
                     )
                     if decision.stop:
-                        state.open_issues.append(decision.reason)
-                        self._stop(wi, outcome, decision.reason, decision.status)
+                        state.open_issues.append(decision.stop_reason.message)
+                        self._stop(wi, outcome, decision.stop_reason)
                         if on_step:
                             on_step(step_outcome)
                         self._write_run(wi, run_id, started_at, run_steps, outcome)
@@ -240,16 +255,17 @@ class Engine:
         )
 
     def _stop(
-        self, wi: Workitem, outcome: RunOutcome, reason: str, status: str
+        self, wi: Workitem, outcome: RunOutcome, stop_reason: StopReason
     ) -> None:
-        """Record a terminal stop state and reason."""
+        """Record a terminal stop state and structured reason."""
         state = wi.state
-        state.status = status
+        state.status = stop_conditions.status_for(stop_reason.type)
         state.stage = "blocked"
         state.next_action = "none"
-        state.record(f"stopped: {reason}")
+        state.stop_reason = stop_reason
+        state.record(f"stopped ({stop_reason.type}): {stop_reason.message}")
         save_state(self.paths, state)
-        outcome.stopped_reason = reason
+        outcome.stopped_reason = stop_reason
 
     def _finish(self, wi: Workitem, outcome: RunOutcome) -> None:
         state = wi.state
@@ -288,7 +304,7 @@ class Engine:
             status=state.status,
             flow=self.flow.name,
             reopen_number=state.reopen_count,
-            stopped_reason=outcome.stopped_reason,
+            stop_reason=outcome.stopped_reason,
             steps=run_steps,
         )
         prompt_chars = [s.prompt_chars for s in run_steps]
@@ -355,7 +371,9 @@ def _build_final_report(wi: Workitem, flow: Flow, outcome: RunOutcome) -> str:
     if wi.state.fix_iterations:
         lines += ["", f"_Fix iterations: {wi.state.fix_iterations}._"]
     if outcome.stopped_reason:
-        lines += ["", f"> Stopped: {outcome.stopped_reason}"]
+        sr = outcome.stopped_reason
+        lines += ["", f"> Stopped ({sr.type}): {sr.message}"]
+        lines += [f">   - {e}" for e in sr.evidence]
     lines += [
         "",
         "## Human validation",

@@ -82,6 +82,33 @@ def test_inspect_shows_resolved_issues_and_validation_status(paths: AiPaths, mon
     assert "test_logout" in result.output
 
 
+def test_inspect_shows_stop_reason(git_paths: AiPaths, monkeypatch):
+    paths = git_paths
+    monkeypatch.chdir(paths.root.parent)
+    wi = create_workitem(paths, "will stop")
+    approve_goal(paths, wi.workitem_id)
+
+    paths.repo_config.write_text(
+        "name: test\n"
+        "providers:\n"
+        "  stopper: { type: cli_one_shot, command: sh, "
+        "args: [\"-c\", \"echo 'STOP: scope_change'; echo 'needs a bigger scope'; echo '- migrate the DB'\"], "
+        "prompt_via: stdin }\n"
+        "roles:\n"
+        "  planner: { provider: stopper }\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["execute"])
+    assert result.exit_code == 1
+
+    inspect_result = runner.invoke(app, ["inspect"])
+    assert inspect_result.exit_code == 0
+    assert "scope_change" in inspect_result.output
+    assert "needs a bigger scope" in inspect_result.output
+    assert "migrate the DB" in inspect_result.output
+
+
 def test_inspect_shows_latest_run(git_paths: AiPaths, monkeypatch):
     paths = git_paths
     monkeypatch.chdir(paths.root.parent)

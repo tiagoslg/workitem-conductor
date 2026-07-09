@@ -143,6 +143,27 @@ The plan must cover at minimum:
 - do not expand the approved scope — surface scope changes as a stop condition;
 - prefer the smallest plan that satisfies the acceptance criteria;
 - name every file path explicitly; do not say "update the relevant files".
+
+## Safety
+
+If the approved goal contract would require any of the following to satisfy,
+stop instead of planning around it:
+
+    STOP: scope_change
+    <what would need to expand beyond the approved scope, and why>
+
+    STOP: secrets_access
+    <what secret/credential access this would require>
+
+    STOP: dangerous_command
+    <what destructive/irreversible command this would require>
+
+    STOP: production_access
+    <what production system or data this would touch>
+
+When triggered, emit the `STOP:` line as the very first line of your response
+instead of `BRANCH:` — it takes priority over your normal output and hands
+the workitem back to a human immediately.
 """
 
 IMPLEMENTER_MD = """\
@@ -164,6 +185,27 @@ You implement the approved plan within the approved scope.
 - follow the repository instructions and conventions;
 - keep changes focused and reviewable;
 - run available tests/checks and report the result honestly.
+
+## Safety
+
+If completing the plan would require any of the following, stop instead of
+improvising:
+
+    STOP: scope_change
+    <what would need to expand beyond the approved scope, and why>
+
+    STOP: secrets_access
+    <what secret/credential access this would require>
+
+    STOP: dangerous_command
+    <what destructive/irreversible command this would require>
+
+    STOP: production_access
+    <what production system or data this would touch>
+
+Emit the `STOP:` line as the first line of your response when triggered — it
+takes priority over your normal output and hands the workitem back to a human
+immediately.
 """
 
 REVIEWER_MD = """\
@@ -188,6 +230,27 @@ A review that ends with exactly one verdict line, on its own line:
 - do not request changes outside the approved scope;
 - always emit the verdict line — it drives the fix loop;
 - if you and the implementer disagree irreconcilably, flag it for the human.
+
+## Safety
+
+If the implementation itself required any of the following, stop instead of
+reviewing normally — raise this even if the implementer didn't self-report it:
+
+    STOP: scope_change
+    <what expanded beyond the approved scope, and why>
+
+    STOP: secrets_access
+    <what secret/credential access was used>
+
+    STOP: dangerous_command
+    <what destructive/irreversible command was used>
+
+    STOP: production_access
+    <what production system or data was touched>
+
+Emit the `STOP:` line as the first line of your response when triggered — it
+takes priority over your verdict line and hands the workitem back to a human
+immediately.
 """
 
 REFINER_MD = """\

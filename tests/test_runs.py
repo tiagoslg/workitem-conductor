@@ -110,6 +110,36 @@ def test_run_manifest_written_on_provider_failure(paths: AiPaths):
 
     run = load_run(wi.directory, "run-001")
     assert run.status == "blocked"
-    assert run.stopped_reason is not None
+    assert run.stop_reason is not None
     assert len(run.steps) == 1
     assert run.steps[0].ok is False
+
+
+def test_stop_reason_round_trips_through_run_yaml(paths: AiPaths):
+    """run.yml's structured stop_reason (type/message/evidence) survives a
+    write/read cycle, not just a plain string."""
+    from conductor.providers.base import ProviderResult
+
+    wi = create_workitem(paths, "will be stopped")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+
+    class StoppingProvider(DryRunProvider):
+        name = "stopping"
+
+        def run(self, request):
+            if request.role == "planner":
+                return ProviderResult(
+                    ok=True,
+                    output="STOP: secrets_access\nneeds a key\n- .env.production\n",
+                    provider=self.name,
+                )
+            return ProviderResult(ok=True, output="dry", provider=self.name)
+
+    engine = Engine(paths, flow, provider_for=lambda role: StoppingProvider())
+    engine.run(wi.workitem_id)
+
+    run = load_run(wi.directory, "run-001")
+    assert run.stop_reason.type == "secrets_access"
+    assert "needs a key" in run.stop_reason.message
+    assert run.stop_reason.evidence == [".env.production"]

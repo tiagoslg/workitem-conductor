@@ -347,6 +347,35 @@ run history.
 Single-repo only for now — workspace (`-w`) execution/reopen don't get
 curated context or summarization yet.
 
+## Safety stop conditions
+
+Any role (planner, implementer, reviewer) can hand a workitem back to a human
+instead of improvising, by emitting a `STOP:` marker as the first line of its
+response — same one-marker convention as `REVIEW:`/`SUMMARY:`:
+
+```
+STOP: scope_change | secrets_access | dangerous_command | production_access
+<why, in plain text>
+- <optional evidence bullet>
+- <optional evidence bullet>
+```
+
+The engine checks every step's output for this marker (not just review-gated
+ones) and, if present, stops immediately — before any `REVIEW:` verdict on
+the same output is even considered. The workitem's `stop_reason` (type,
+message, evidence) is recorded in both `state.yml` and the run's `run.yml`,
+and shown by `conductor inspect` and the final report.
+
+`status` reflects *why* it stopped: `blocked` for a technical/provider
+failure, `needs_human` for everything semantic (a `STOP:` marker, the global
+step cap, or the fix loop being exhausted) — a decision or risk a human needs
+to weigh in on, not a bug.
+
+Deterministic detection of a stuck fix loop (repeated near-identical
+review/implementer output) is not implemented yet — `max_fix_iterations`
+remains the only backstop for that case. Single-repo only for now —
+`WorkspaceEngine` doesn't check for `STOP:` markers.
+
 ## Cross-project workitems and workspace execution
 
 ### Defining cross-project workitems
@@ -498,6 +527,15 @@ across projects).
   `context.max_prompt_chars` budget. Raw-output inclusion stays available as
   an opt-in for repos not yet trusting their summarizer. Single-repo only for
   now — workspace (`-w`) execution/reopen are a fast-follow.
+- **Safety stop conditions** — any role can emit a `STOP:` marker (scope
+  change, secrets access, dangerous command, production access) as the first
+  line of its response, checked on every step and taking priority over a
+  `REVIEW:` verdict on the same output. The structured reason (type/message/
+  evidence) is recorded in `state.yml` and `run.yml` and shown by `conductor
+  inspect` and the final report; `status` is `blocked` for a technical/
+  provider failure and `needs_human` for everything semantic. Deterministic
+  stuck-loop detection is not implemented yet — `max_fix_iterations` remains
+  the only backstop for that. Single-repo only for now.
 
 ### Track A — execution
 

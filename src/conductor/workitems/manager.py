@@ -183,6 +183,7 @@ def reopen_workitem(
     state.status = "ready"
     state.next_action = "execute"
     state.fix_iterations = 0
+    state.stop_reason = None
     state.reopen_count += 1
     state.record(f"reopened: {reason.strip()[:100]}")
     save_state(paths, state)

@@ -114,6 +114,21 @@ class HistoryEntry(BaseModel):
     summary: str
 
 
+class StopReason(BaseModel):
+    """Why a run stopped — shared by ``WorkitemState`` and ``RunRecord`` so
+    both describe the same event the same way, not a display string that can
+    drift from a structured field.
+
+    ``type`` is a plain ``str``, not a strict ``Literal`` — same "don't crash
+    on an unexpected value" posture already used for stage/status/next_action
+    on ``WorkitemState``.
+    """
+
+    type: str = "other"
+    message: str
+    evidence: list[str] = Field(default_factory=list)
+
+
 class WorkitemState(BaseModel):
     """Compact, evolvable execution state for a single workitem."""
 
@@ -128,6 +143,7 @@ class WorkitemState(BaseModel):
     fix_iterations: int = 0
     reopen_count: int = 0
     feature_branch: str | None = None
+    stop_reason: StopReason | None = None
     open_issues: list[str] = Field(default_factory=list)
     human_overrides: list[str] = Field(default_factory=list)
     artifacts: dict[str, str | None] = Field(default_factory=dict)

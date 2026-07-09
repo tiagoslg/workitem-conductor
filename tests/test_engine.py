@@ -163,7 +163,7 @@ def test_fix_loop_stops_at_max_iterations(paths: AiPaths):
     outcome = engine.run(wi.workitem_id)
 
     assert outcome.completed is False
-    assert "fix iteration" in outcome.stopped_reason
+    assert "fix iteration" in outcome.stopped_reason.message
 
     reloaded = load_workitem(paths, wi.workitem_id)
     assert reloaded.state.status == "needs_human"
@@ -198,10 +198,100 @@ def test_engine_stops_on_provider_failure(paths: AiPaths):
     outcome = engine.run(wi.workitem_id)
 
     assert outcome.completed is False
-    assert "planner" in outcome.stopped_reason
+    assert "planner" in outcome.stopped_reason.message
     reloaded = load_workitem(paths, wi.workitem_id)
     assert reloaded.state.status == "blocked"
     assert reloaded.state.step_index == 0  # did not advance past the failed step
+
+
+class ScriptedRoleOutputProvider(DryRunProvider):
+    """Provider that returns a fixed output for one role, dry-run for the rest."""
+
+    name = "scripted-role"
+
+    def __init__(self, role: str, output: str) -> None:
+        self.role = role
+        self.output = output
+
+    def run(self, request):
+        if request.role == self.role:
+            return ProviderResult(ok=True, output=self.output, provider=self.name)
+        return ProviderResult(ok=True, output=f"# {request.role}\noutput", provider=self.name)
+
+
+def test_stop_marker_from_planner_halts_run_before_implementer(paths: AiPaths):
+    wi = create_workitem(paths, "risky change")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    provider = ScriptedRoleOutputProvider(
+        "planner",
+        "STOP: scope_change\nThis needs a schema migration outside approved scope.\n",
+    )
+
+    engine = Engine(paths, flow, provider_for=lambda role: provider)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is False
+    assert [s.role for s in outcome.steps] == ["planner"]
+    assert outcome.stopped_reason.type == "scope_change"
+    assert "schema migration" in outcome.stopped_reason.message
+
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.status == "needs_human"
+    assert reloaded.state.stop_reason.type == "scope_change"
+
+
+def test_stop_marker_from_implementer_halts_before_reviewer(paths: AiPaths):
+    wi = create_workitem(paths, "needs secrets")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    provider = ScriptedRoleOutputProvider(
+        "implementer",
+        "STOP: secrets_access\nRequires reading .env.production to proceed.\n",
+    )
+
+    engine = Engine(paths, flow, provider_for=lambda role: provider)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is False
+    assert [s.role for s in outcome.steps] == ["planner", "implementer"]
+    assert outcome.stopped_reason.type == "secrets_access"
+
+
+def test_stop_marker_takes_precedence_over_review_verdict(paths: AiPaths):
+    wi = create_workitem(paths, "conflicting signals")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    provider = ScriptedRoleOutputProvider(
+        "reviewer",
+        "STOP: dangerous_command\nWould require `rm -rf /data`.\nREVIEW: approved\n",
+    )
+
+    engine = Engine(paths, flow, provider_for=lambda role: provider)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is False
+    assert outcome.stopped_reason.type == "dangerous_command"
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.status == "needs_human"
+
+
+def test_reopen_clears_prior_stop_reason(paths: AiPaths):
+    from conductor.workitems.manager import reopen_workitem
+
+    wi = create_workitem(paths, "will be stopped then reopened")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    provider = ScriptedRoleOutputProvider(
+        "planner", "STOP: scope_change\nout of scope.\n"
+    )
+    engine = Engine(paths, flow, provider_for=lambda role: provider)
+    engine.run(wi.workitem_id)
+
+    assert load_workitem(paths, wi.workitem_id).state.stop_reason is not None
+
+    reopen_workitem(paths, wi.workitem_id, "try again")
+    assert load_workitem(paths, wi.workitem_id).state.stop_reason is None
 
 
 # --- BRANCH: marker extraction (unit, no subprocess) ---
