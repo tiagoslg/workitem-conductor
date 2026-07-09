@@ -572,7 +572,15 @@ def inspect(
     console.print(table)
 
     memory = load_memory(paths, wid)
-    if memory.current_summary or memory.open_issues or memory.decisions:
+    validation = memory.validation_status
+    if (
+        memory.current_summary
+        or memory.open_issues
+        or memory.resolved_issues
+        or memory.decisions
+        or validation.last_tests
+        or validation.failing
+    ):
         console.print("\n[bold]Memory:[/bold]")
         if memory.current_summary:
             console.print(f"  {memory.current_summary.strip()}")
@@ -580,10 +588,20 @@ def inspect(
             console.print("  [dim]open issues:[/dim]")
             for issue in memory.open_issues:
                 console.print(f"    - {issue}")
+        if memory.resolved_issues:
+            console.print("  [dim]resolved issues:[/dim]")
+            for issue in memory.resolved_issues[-2:]:
+                console.print(f"    - {issue}")
         if memory.decisions:
             console.print("  [dim]recent decisions:[/dim]")
             for decision in memory.decisions[-2:]:
                 console.print(f"    - {decision.decision}")
+        if validation.failing:
+            console.print("  [dim]failing tests:[/dim]")
+            for test in validation.failing:
+                console.print(f"    - {test}")
+        elif validation.last_tests:
+            console.print(f"  [dim]last test run:[/dim] {len(validation.last_tests)} passing")
 
     run_ids = list_run_ids(wi.directory)
     if not run_ids:
@@ -980,20 +998,22 @@ def reopen(
         f"status=[yellow]{updated.state.status}[/yellow] "
         f"next=[bold]{updated.state.next_action}[/bold]"
     )
-    _summarize_on_reopen(paths, updated, reason)
+    _summarize_on_reopen(paths, updated, reason, wt_path if wt_path.is_dir() else paths.cwd)
     console.print("\nNext: [bold]conductor execute[/bold]")
 
 
-def _summarize_on_reopen(paths: AiPaths, wi, reason: str) -> None:
+def _summarize_on_reopen(paths: AiPaths, wi, reason: str, execution_cwd: Path) -> None:
     """Best-effort summarizer call right after a reopen — never blocks it.
 
     Reopen's job (resetting state) must stay reliable even if repo.yml is
-    missing/invalid or the summarizer's provider binding fails.
+    missing/invalid or the summarizer's provider binding fails. Uses the
+    preserved worktree (when ``--from`` kept one) so the diff summarized
+    reflects the actual in-progress work, not the bare repo checkout.
     """
     try:
         config = load_repo_config(paths)
         provider_for = build_provider_for(config)
-        summarize(paths, wi, provider_for("summarizer"), "reopen", [], paths.cwd)
+        summarize(paths, wi, provider_for("summarizer"), "reopen", [], execution_cwd)
     except Exception as exc:
         console.print(f"  [dim]summarizer skipped: {exc}[/dim]")
 

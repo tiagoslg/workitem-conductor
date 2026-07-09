@@ -138,7 +138,15 @@ def _latest_output_for_role(workitem: Workitem, role: str) -> str | None:
 def _memory_section(paths: AiPaths, workitem: Workitem) -> str | None:
     """A curated ``## Memory`` section from ``memory.yml``, or ``None`` if empty."""
     memory = load_memory(paths, workitem.workitem_id)
-    if not memory.current_summary and not memory.open_issues and not memory.decisions:
+    validation = memory.validation_status
+    if (
+        not memory.current_summary
+        and not memory.open_issues
+        and not memory.resolved_issues
+        and not memory.decisions
+        and not validation.last_tests
+        and not validation.failing
+    ):
         return None
     parts = ["\n## Memory\n"]
     if memory.current_summary:
@@ -146,9 +154,17 @@ def _memory_section(paths: AiPaths, workitem: Workitem) -> str | None:
     if memory.open_issues:
         parts.append("\n**Open issues:**")
         parts.extend(f"- {i}" for i in memory.open_issues)
+    if memory.resolved_issues:
+        parts.append("\n**Resolved issues:**")
+        parts.extend(f"- {i}" for i in memory.resolved_issues[-3:])
     if memory.decisions:
         parts.append("\n**Recent decisions:**")
         parts.extend(f"- {d.decision}" for d in memory.decisions[-3:])
+    if validation.failing:
+        parts.append("\n**Failing tests:**")
+        parts.extend(f"- {t}" for t in validation.failing)
+    elif validation.last_tests:
+        parts.append(f"\n**Last test run:** {len(validation.last_tests)} passing")
     return "\n".join(parts)
 
 

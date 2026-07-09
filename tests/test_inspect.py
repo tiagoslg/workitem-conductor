@@ -9,7 +9,8 @@ from typer.testing import CliRunner
 from conductor.cli import app
 from conductor.paths import AiPaths
 from conductor.scaffold import scaffold_ai
-from conductor.workitems.manager import approve_goal, create_workitem, reopen_workitem
+from conductor.workitems.manager import approve_goal, create_workitem, reopen_workitem, save_memory
+from conductor.workitems.models import MemoryRecord, ValidationStatus
 
 runner = CliRunner()
 
@@ -66,6 +67,19 @@ def test_inspect_rejects_id_and_active_together(paths: AiPaths, monkeypatch):
     result = runner.invoke(app, ["inspect", wi.workitem_id, "--active"])
     assert result.exit_code == 1
     assert "either" in result.output.lower()
+
+
+def test_inspect_shows_resolved_issues_and_validation_status(paths: AiPaths, monkeypatch):
+    monkeypatch.chdir(paths.root.parent)
+    wi = create_workitem(paths, "memory display")
+    save_memory(paths, wi.workitem_id, MemoryRecord(
+        resolved_issues=["fixed the flaky login test"],
+        validation_status=ValidationStatus(failing=["test_logout"]),
+    ))
+    result = runner.invoke(app, ["inspect"])
+    assert result.exit_code == 0
+    assert "fixed the flaky login test" in result.output
+    assert "test_logout" in result.output
 
 
 def test_inspect_shows_latest_run(git_paths: AiPaths, monkeypatch):

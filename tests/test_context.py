@@ -139,6 +139,22 @@ def test_memory_section_absent_when_no_memory_yet(paths, workitem):
     assert "## Memory" not in ctx
 
 
+def test_memory_section_includes_resolved_issues_and_validation_status(paths, workitem):
+    from conductor.workitems.manager import save_memory
+    from conductor.workitems.models import MemoryRecord, ValidationStatus
+
+    save_memory(paths, workitem.workitem_id, MemoryRecord(
+        resolved_issues=["fixed the flaky login test"],
+        validation_status=ValidationStatus(
+            last_tests=["test_login"], failing=["test_logout"]
+        ),
+    ))
+    ctx = build_context(paths, workitem, "implementer")
+    assert "## Memory" in ctx
+    assert "fixed the flaky login test" in ctx
+    assert "test_logout" in ctx
+
+
 def test_budget_truncates_optional_sections_but_keeps_task_instruction(paths, workitem):
     _write_output(workitem, 0, "reviewer", "x" * 5000)
     # the fixed prefix (role prompt/workitem/goal) alone, with no optional
