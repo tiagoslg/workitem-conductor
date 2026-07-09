@@ -74,12 +74,16 @@ class Engine:
         provider_for: ProviderFor,
         execution_cwd: Path | None = None,
         context_config: ContextConfig | None = None,
+        strategy_name: str | None = None,
+        strategy_hash: str | None = None,
     ) -> None:
         self.paths = paths
         self.flow = flow
         self.provider_for = provider_for
         self._execution_cwd = execution_cwd or paths.cwd
         self.context_config = context_config
+        self.strategy_name = strategy_name
+        self.strategy_hash = strategy_hash
 
     def run(
         self,
@@ -304,6 +308,8 @@ class Engine:
             status=state.status,
             flow=self.flow.name,
             reopen_number=state.reopen_count,
+            strategy=self.strategy_name,
+            strategy_hash=self.strategy_hash,
             stop_reason=outcome.stopped_reason,
             steps=run_steps,
         )

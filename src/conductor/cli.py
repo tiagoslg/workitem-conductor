@@ -50,6 +50,8 @@ from .flows.loader import FlowNotFound, load_flow
 from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, WorkspacePaths, require_ai_paths
 from .providers.registry import ProviderConfigError, build_provider, build_provider_for
 from .scaffold import scaffold_ai, scaffold_workspace
+from .strategies.loader import StrategyNotFound, load_strategy, strategy_content_hash
+from .strategies.selector import select_strategy
 from .workitems.manager import (
     approve_goal,
     create_workitem,
@@ -238,6 +240,32 @@ def init() -> None:
         console.print("Then: [bold]conductor define \"<your goal>\"[/bold]")
 
 
+def _resolve_strategy(
+    paths: AiPaths, wi, strategy_override: str | None, *, reselect_if_unlocked: bool
+) -> None:
+    """Apply a `--strategy` override (locking it) or reselect via
+    `select_strategy()` unless the workitem's strategy is already locked.
+
+    Single-repo only — workspace workitems never call this (WorkspaceEngine
+    doesn't do strategy selection yet, see the M7 plan). Exits cleanly on an
+    unknown strategy name.
+    """
+    state = wi.state
+    if strategy_override:
+        try:
+            load_strategy(paths, strategy_override)
+        except StrategyNotFound as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+        state.strategy = strategy_override
+        state.strategy_locked = True
+        save_state(paths, state)
+        return
+    if reselect_if_unlocked and not state.strategy_locked:
+        state.strategy = select_strategy(wi.goal, state)
+        save_state(paths, state)
+
+
 @app.command()
 def define(
     goal: str = typer.Argument(
@@ -246,6 +274,9 @@ def define(
     workspace: str = typer.Option(
         None, "--workspace", "-w",
         help="Create a cross-project workitem in this workspace instead of the current repo."
+    ),
+    strategy: str = typer.Option(
+        None, "--strategy", help="Pin a strategy instead of letting the selector choose."
     ),
 ) -> None:
     """Create a workitem and an editable goal contract from a goal statement."""
@@ -270,12 +301,14 @@ def define(
 
     paths = _load_paths()
     workitem = create_workitem(paths, goal)
+    _resolve_strategy(paths, workitem, strategy, reselect_if_unlocked=True)
 
     goal_file = workitem.directory / "goal.yml"
     rel = goal_file.relative_to(Path.cwd()) if goal_file.is_relative_to(Path.cwd()) else goal_file
     console.print(f"[green]Created workitem[/green] [bold]{workitem.workitem_id}[/bold]")
     console.print(f"  goal:  {rel}")
     console.print(f"  state: stage=[cyan]defined[/cyan] status=[yellow]draft[/yellow]")
+    console.print(f"  strategy: [magenta]{workitem.state.strategy}[/magenta]")
     console.print(
         "\nNext: run [bold]conductor refine[/bold] for AI-assisted scope/criteria,\n"
         f"or edit {rel} by hand — then [bold]conductor approve[/bold] and [bold]conductor execute[/bold]."
@@ -289,6 +322,9 @@ def approve(
     ),
     workspace: str = typer.Option(
         None, "--workspace", "-w", help="Approve a cross-project workitem in this workspace."
+    ),
+    strategy: str = typer.Option(
+        None, "--strategy", help="Pin a strategy instead of reselecting from the refined goal."
     ),
 ) -> None:
     """Approve the goal contract and mark the workitem ready to execute."""
@@ -308,8 +344,16 @@ def approve(
 
     already_synced = wi.goal.approved and wi.state.status != "draft"
     if already_synced:
+        if not workspace and strategy:
+            _resolve_strategy(paths, wi, strategy, reselect_if_unlocked=False)
         console.print(f"[dim]{wid} is already approved and ready.[/dim]")
         return
+
+    # This is the evaluation that actually matters: by now `refine` (or a
+    # hand-edit) has filled in acceptance_criteria, so the selector has
+    # something real to read — unless a human already pinned one at `define`.
+    if not workspace:
+        _resolve_strategy(paths, wi, strategy, reselect_if_unlocked=True)
 
     updated = approve_goal(paths, wid)
     console.print(f"[green]Approved[/green] [bold]{updated.workitem_id}[/bold]")
@@ -318,6 +362,8 @@ def approve(
         f"status=[yellow]{updated.state.status}[/yellow] "
         f"next=[bold]{updated.state.next_action}[/bold]"
     )
+    if not workspace:
+        console.print(f"  strategy: [magenta]{updated.state.strategy}[/magenta]")
     console.print("\nNext: [bold]conductor execute[/bold]")
 
 
@@ -477,6 +523,8 @@ def status(
     table.add_column("value")
     table.add_row("title", wi.state.title)
     table.add_row("flow", wi.state.flow)
+    if wi.state.strategy:
+        table.add_row("strategy", wi.state.strategy)
     table.add_row("stage", f"[cyan]{wi.state.stage}[/cyan]")
     table.add_row("status", f"[yellow]{wi.state.status}[/yellow]")
     table.add_row("next action", wi.state.next_action)
@@ -571,6 +619,8 @@ def inspect(
     table.add_column("value")
     table.add_row("title", state.title)
     table.add_row("flow", state.flow)
+    if state.strategy:
+        table.add_row("strategy", state.strategy)
     table.add_row("stage", f"[cyan]{state.stage}[/cyan]")
     table.add_row("status", f"[yellow]{state.status}[/yellow]")
     table.add_row("next action", state.next_action)
@@ -715,11 +765,21 @@ def execute(
         err_console.print(f"[red]Workitem not found:[/red] {wid}")
         raise typer.Exit(code=1)
 
+    strategy = None
+    if wi.state.strategy:
+        try:
+            strategy = load_strategy(paths, wi.state.strategy)
+        except StrategyNotFound as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+
     try:
-        flow = load_flow(paths, wi.state.flow)
+        flow = load_flow(paths, strategy.flow if strategy else wi.state.flow)
     except FlowNotFound as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
+    if strategy and strategy.max_fix_iterations is not None:
+        flow = flow.model_copy(update={"max_fix_iterations": strategy.max_fix_iterations})
 
     try:
         config = load_repo_config(paths)
@@ -727,7 +787,10 @@ def execute(
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
 
-    provider_for = build_provider_for(config, dry_run=dry_run)
+    provider_for = build_provider_for(
+        config, dry_run=dry_run, role_overrides=strategy.roles if strategy else None
+    )
+    context_config = (strategy.context if strategy else None) or config.context
 
     try:
         wt_path = create_worktree(paths, wid, source_branch=config.source_branch)
@@ -737,12 +800,15 @@ def execute(
 
     engine = Engine(
         paths, flow, provider_for=provider_for,
-        execution_cwd=wt_path, context_config=config.context,
+        execution_cwd=wt_path, context_config=context_config,
+        strategy_name=wi.state.strategy,
+        strategy_hash=strategy_content_hash(paths, wi.state.strategy) if strategy else None,
     )
 
     mode = "[yellow]dry-run[/yellow]" if dry_run else "providers from repo.yml"
+    strategy_suffix = f" · strategy [magenta]{wi.state.strategy}[/magenta]" if wi.state.strategy else ""
     console.print(
-        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan] · {mode}"
+        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan]{strategy_suffix} · {mode}"
     )
     branch_from = f" · from [bold]{config.source_branch}[/bold]" if config.source_branch else ""
     console.print(

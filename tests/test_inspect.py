@@ -124,6 +124,17 @@ def test_inspect_shows_latest_run(git_paths: AiPaths, monkeypatch):
     assert "planner" in result.output
 
 
+def test_inspect_shows_active_strategy(git_paths: AiPaths, monkeypatch):
+    paths = git_paths
+    monkeypatch.chdir(paths.root.parent)
+    assert runner.invoke(app, ["define", "fix a small bug", "--strategy", "bugfix"]).exit_code == 0
+
+    result = runner.invoke(app, ["inspect"])
+    assert result.exit_code == 0
+    assert "strategy" in result.output.lower()
+    assert "bugfix" in result.output
+
+
 def test_inspect_workspace_shows_run_with_project_steps(tmp_path: Path, monkeypatch):
     """A workspace workitem's `inspect -w` shows run history with per-project steps,
     now that WorkspaceEngine writes run.yml/metrics.yml (fast-follow to M4)."""

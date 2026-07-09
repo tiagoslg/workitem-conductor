@@ -75,6 +75,10 @@ class AiPaths:
         return self.root / "flows"
 
     @property
+    def strategies_dir(self) -> Path:
+        return self.root / "strategies"
+
+    @property
     def roles_dir(self) -> Path:
         return self.root / "roles"
 

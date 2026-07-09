@@ -47,6 +47,8 @@ class RunRecord(BaseModel):
     flow: str
     source: str = "execute"
     reopen_number: int = 0
+    strategy: str | None = None
+    strategy_hash: str | None = None
     stop_reason: StopReason | None = None
     steps: list[StepRecord] = Field(default_factory=list)
 

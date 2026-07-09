@@ -49,6 +49,8 @@ def test_engine_run_writes_run_manifest(paths: AiPaths):
     assert run.status == "completed"
     assert run.flow == "simple-change"
     assert run.reopen_number == 0
+    assert run.strategy is None
+    assert run.strategy_hash is None
     assert [s.role for s in run.steps] == ["planner", "implementer", "reviewer", "validator"]
     assert all(s.ok for s in run.steps)
     assert all(s.duration_sec >= 0 for s in run.steps)

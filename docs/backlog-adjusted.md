@@ -806,6 +806,64 @@ Cada run deve guardar a versão/hash da strategy usada.
 
 ---
 
+## Estado (2026-07-09): implementado — itens 35-39 concluídos
+
+- **Item 35 — modelo `Strategy`.** Novo `strategies/models.py`: `flow` +
+  `roles` (overlay sobre `repo.yml`) + `context` (sobrepõe `ContextConfig`
+  inteira, ou herda a de `repo.yml` se omissa) + `max_fix_iterations`. **Bundle
+  completo**, tal como o exemplo YAML do backlog — decisão confirmada com o
+  utilizador — e não só um seletor de flow. As *definições* de provider
+  (`type`/`command`/`args`) continuam só em `repo.yml`'s `providers:`; uma
+  strategy só pode mudar a que provider um role está *ligado*
+  (`providers/registry.py::build_provider_for` ganhou `role_overrides`).
+- **Item 36 — 4 strategies iniciais scaffolded** em `.ai/strategies/`:
+  `simple-change` (default, comportamento idêntico a não ter strategy),
+  `bugfix` (`max_fix_iterations: 2`, só alcançável via `--strategy` — o
+  selector não tem regra para bugfix), `context-heavy-change`
+  (`include_raw_outputs: true`, prompt budget maior),
+  `phased-documentation` (placeholder — comporta-se como `simple-change` até
+  o M8 trazer execução por fases a sério). `cross-project-change` e
+  `tpa-claim-flow` do exemplo do backlog **não foram scaffolded** — o
+  primeiro precisa de wiring no `WorkspaceEngine` (adiado), o segundo é um
+  exemplo específico de projeto sem default genérico sensato.
+- **Item 37 — selector por regras**, mas só 2 das 4 regras documentadas são
+  alcançáveis nesta fase: `acceptance_criteria contém "docs"` →
+  `phased-documentation`, senão → `simple-change`. As outras duas —
+  `target_projects > 1 → cross-project-change` e `reopen_count >= 2 →
+  context-heavy-change` — estão **especificadas mas inalcançáveis**
+  deliberadamente, não escondidas: a primeira porque `WorkspaceEngine` não
+  chama o selector (mesma precedência "single-repo first"); a segunda porque
+  `reopen_workitem()` vai direto para `status=ready`/`next_action=execute`
+  sem passar por `approve` — não há ponto de reseleção depois de um reopen
+  sem mexer na própria semântica do reopen, o que ficou fora de escopo.
+- **Quando o selector corre (decisão confirmada com o utilizador):** em
+  `define` (quase sempre dá `simple-change`, porque `acceptance_criteria`
+  ainda está vazio) e outra vez em `approve` (a avaliação que importa, já
+  com o goal contract refinado). `--strategy <nome>` em `define`/`approve`
+  ignora o selector e **tranca** a escolha (`state.strategy_locked`) — a
+  reseleção em `approve` respeita o lock e não a sobrepõe.
+- **Item 38 — `strategy` fica em `state.yml`**, não em `goal.yml` — mesmo
+  sítio que já guarda `flow`, por ser estado de execução, não parte do
+  contrato humano.
+- **Item 39 — `run.yml` guarda `strategy` + `strategy_hash`** (sha1 truncado
+  do conteúdo do ficheiro da strategy no momento do run, mesmo padrão de
+  digest do `paths.py::_project_id`) — permite auditar mais tarde que
+  versão da strategy esteve em vigor, mesmo que o ficheiro seja editado
+  depois.
+- Testado manualmente ponta-a-ponta: `define` sem override escolhe
+  `simple-change` (acceptance_criteria vazio); depois de editar `goal.yml`
+  com um critério "docs", `approve` reseleciona corretamente para
+  `phased-documentation`; `--strategy bugfix` em `define` mantém-se trancado
+  mesmo com "docs" nos critérios ao correr `approve`; `run.yml` grava
+  `strategy`/`strategy_hash` corretamente.
+- Suite de testes: 216 → 232 (novo `tests/test_strategies.py` e
+  `tests/test_strategy_cli.py`, incluindo testes que provam ponta-a-ponta
+  que o overlay de `roles` muda mesmo o provider usado e que
+  `max_fix_iterations` da strategy sobrepõe o default do flow).
+- `WorkspaceEngine` não foi tocado — mesma precedência "single-repo first".
+
+---
+
 # M8 — Phased Execution
 
 ## Objetivo

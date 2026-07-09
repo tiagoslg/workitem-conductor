@@ -103,6 +103,49 @@ steps:
 max_fix_iterations: 3
 """
 
+SIMPLE_CHANGE_STRATEGY = """\
+# Strategy: simple-change
+# The default — identical behavior to running with no strategy at all.
+# Every field below is optional; omitted ones inherit repo.yml's value.
+name: simple-change
+flow: simple-change
+description: Default strategy — no overrides on top of repo.yml.
+"""
+
+BUGFIX_STRATEGY = """\
+# Strategy: bugfix
+# A bugfix should converge faster than a general change — tighter fix-loop cap.
+# Not reached by the automatic selector yet (no bugfix-detecting rule) — bind
+# it explicitly with `--strategy bugfix`.
+name: bugfix
+flow: simple-change
+description: Tighter fix-loop cap for small, well-scoped bug fixes.
+max_fix_iterations: 2
+"""
+
+CONTEXT_HEAVY_CHANGE_STRATEGY = """\
+# Strategy: context-heavy-change
+# For workitems that benefit from full context (many reopens, a change that
+# touches unfamiliar code) rather than the default curated-memory summary.
+name: context-heavy-change
+flow: simple-change
+description: Larger prompt budget, raw prior outputs included instead of just curated memory.
+context:
+  max_prompt_chars: 96000
+  include_raw_outputs: true
+"""
+
+PHASED_DOCUMENTATION_STRATEGY = """\
+# Strategy: phased-documentation
+# Placeholder for now — behaves exactly like simple-change. Real phase-by-phase
+# execution (splitting the plan into PHASE 1/2/3 sub-runs) arrives in M8;
+# until then this strategy exists so the selector's "docs" rule has somewhere
+# to point, without inventing phased behavior ahead of that milestone.
+name: phased-documentation
+flow: simple-change
+description: Reserved for docs-heavy work — currently identical to simple-change.
+"""
+
 PLANNER_MD = """\
 # Role: planner
 
@@ -455,6 +498,10 @@ _FILES: tuple[tuple[str, str], ...] = (
     ("repo.yml", REPO_YML),
     ("instructions.md", INSTRUCTIONS_MD),
     ("flows/simple-change.yml", SIMPLE_CHANGE_FLOW),
+    ("strategies/simple-change.yml", SIMPLE_CHANGE_STRATEGY),
+    ("strategies/bugfix.yml", BUGFIX_STRATEGY),
+    ("strategies/context-heavy-change.yml", CONTEXT_HEAVY_CHANGE_STRATEGY),
+    ("strategies/phased-documentation.yml", PHASED_DOCUMENTATION_STRATEGY),
     ("roles/planner.md", PLANNER_MD),
     ("roles/implementer.md", IMPLEMENTER_MD),
     ("roles/reviewer.md", REVIEWER_MD),

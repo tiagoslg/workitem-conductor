@@ -91,6 +91,11 @@ can be committed alongside the code it configures:
   repo.yml                 # repo config; role → provider mapping (versioned)
   instructions.md          # repo-specific guidance (versioned)
   flows/simple-change.yml  # the default flow (versioned)
+  strategies/              # named flow+role+context+budget bundles (see "Strategies")
+    simple-change.yml
+    bugfix.yml
+    context-heavy-change.yml
+    phased-documentation.yml
   roles/planner.md         # provider-neutral role prompts (versioned)
   roles/implementer.md
   roles/reviewer.md
@@ -164,6 +169,67 @@ roles:
 up with the model pulled (for `ollama`). The conductor never logs in for you —
 CLIs must already be authenticated and API keys must be exported in your
 environment.
+
+## Strategies
+
+A **strategy** is a named, reusable bundle — which flow to run, plus optional
+overlays on top of `repo.yml`'s role bindings, context budget, and fix-loop
+cap — so different kinds of workitems don't all have to be treated
+identically. It overlays `repo.yml`, it doesn't replace it: provider
+*definitions* (`type`/`command`/`args`) always live in `repo.yml`'s
+`providers:` dict; a strategy can only change which provider a role is
+*bound* to, plus context/budget values.
+
+```yaml
+# .ai/strategies/context-heavy-change.yml
+name: context-heavy-change
+flow: simple-change
+roles:
+  implementer: { provider: qwen_cli }   # overrides repo.yml's binding for this role only
+context:
+  max_prompt_chars: 96000
+  include_raw_outputs: true
+max_fix_iterations: 3
+```
+
+Four strategies are scaffolded by `init`: `simple-change` (the default —
+identical behavior to running with no strategy at all), `bugfix` (tighter
+`max_fix_iterations`), `context-heavy-change` (bigger prompt budget, raw
+outputs instead of curated memory), and `phased-documentation` (currently a
+placeholder — real phase-by-phase execution is a separate, later piece of
+work; for now it behaves like `simple-change`).
+
+A workitem's strategy is picked by a small rule-based selector, run once at
+`conductor define` (before `refine`, so it almost always lands on
+`simple-change` since `acceptance_criteria` is still empty) and again at
+`conductor approve` — the evaluation that actually matters, once `refine` (or
+a hand-edit) has filled in the goal contract:
+
+```
+if acceptance_criteria mentions "docs"/"documentation" -> phased-documentation
+else                                                   -> simple-change
+```
+
+Pin one explicitly instead of trusting the selector:
+
+```bash
+conductor define "fix the null check" --strategy bugfix
+conductor approve --strategy context-heavy-change
+```
+
+`--strategy` **locks** the choice (`state.strategy_locked`) so `approve`'s
+automatic reselection won't clobber a human's explicit pick. The active
+strategy shows up in `conductor inspect`/`conductor status`, and every run
+records both `strategy` and a short content hash (`strategy_hash`) in
+`run.yml`, so you can tell later which version of a strategy was in effect
+even if the file's been edited since.
+
+Two rules from the original design aren't reachable yet, on purpose rather
+than silently: `target_projects > 1 -> cross-project-change` (workspace
+workitems don't call the selector — `conductor execute -w` still hardcodes
+its own flow) and `reopen_count >= 2 -> context-heavy-change` (`conductor
+reopen` goes straight back to ready-to-execute without an `approve` step, so
+there's no point to reselect from yet).
 
 ## Git workflow
 
@@ -558,6 +624,13 @@ across projects).
   at the end rather than per project. A `STOP:` marker from any project's
   role halts the *entire* workspace run immediately — unlike a plain
   provider failure, which only skips that project and moves on.
+- **Strategies** — a named bundle of flow + role/context/budget overlays on
+  top of `repo.yml` (see [Strategies](#strategies)), picked by a small
+  rule-based selector at `define` and `approve`, or pinned with
+  `--strategy <name>`. Every run records which strategy was used and a
+  content hash of it. Single-repo only for now — `WorkspaceEngine` doesn't
+  select a strategy yet, and reselecting after a `reopen` is deferred (no
+  `approve` step to hook into).
 
 ### Track A — execution
 

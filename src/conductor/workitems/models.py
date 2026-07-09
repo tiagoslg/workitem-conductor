@@ -135,6 +135,10 @@ class WorkitemState(BaseModel):
     workitem_id: str
     title: str
     flow: str = "simple-change"
+    strategy: str | None = None
+    #: True once a human has explicitly pinned `strategy` via `--strategy` —
+    #: `approve`'s automatic reselection skips a locked workitem.
+    strategy_locked: bool = False
     stage: str = "defined"
     status: str = "draft"
     next_action: str = "approve_goal"
