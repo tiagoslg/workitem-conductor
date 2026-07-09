@@ -677,6 +677,71 @@ what next action
 
 ---
 
+## Estado (2026-07-09): `WorkspaceEngine` fast-follows concluídos
+
+Fecha os três itens que M4/M5/M6 tinham deliberadamente deixado de fora do
+`WorkspaceEngine` (execução `-w`, cross-project). Descoberta feita durante a
+exploração: `WorkspaceEngine` não tinha **nenhum** teste (`tests/test_workspace_engine.py`
+não existia, nenhum teste de CLI exercitava `execute -w`) — corrigido como
+parte deste trabalho, não como reboque.
+
+- **Registo de runs/metrics.** `WorkspaceEngine.run()` agora escreve um único
+  `run.yml`/`metrics.yml` por run do workspace (não um por projeto) sob
+  `runs/<id>/`, tal como o `Engine` single-repo. `StepRecord` ganhou um campo
+  opcional `project_name: str | None` — `None` para o step do planner
+  (workspace-level), definido para cada step de implementer/reviewer por
+  projeto. `conductor inspect -w <ws>` passou a mostrar o histórico de runs
+  "de graça", já que já usava `list_run_ids`/`load_run` genericamente sobre
+  `wi.directory`. **Decisão de scope:** `metrics.git` fica `None` para runs
+  de workspace — sem agregação de git-stat multi-projeto por agora, mesma
+  postura "aditivo primeiro" do M4.
+- **Chamada ao `summarizer`.** Chamado uma única vez no fim de `run()`
+  (`trigger="finish"` ou `"stop"`), não por projeto nem por loop-back —
+  usa `ws_paths.cwd` (ancestral comum dos project_roots) como
+  `execution_cwd`. Best-effort, nunca quebra o run (mesmo padrão try/except
+  do `Engine._summarize`).
+- **Detecção de marker `STOP:`.** Qualquer role pode emitir `STOP:` —
+  verificado no output do **planner** (antes da Phase 2 começar) e, por
+  projeto, depois do implementer e do reviewer em `_run_project()`, com
+  prioridade sobre o veredicto do reviewer no mesmo output (mesma
+  precedência do M6 single-repo). Um `STOP:` do planner para o run antes de
+  qualquer projeto ser sequer tocado — nenhum worktree chega a ser criado.
+  **Correção pós-review:** a primeira versão só verificava o marker no
+  implementer/reviewer, esquecendo o planner — um review externo apanhou
+  esta inconsistência com o README (que documenta "qualquer role"), corrigida
+  reutilizando `_stop_project()` com `project_name=None` para o caso do
+  planner. **Decisão de scope confirmada com o utilizador:** um `STOP:` para
+  o run do workspace **inteiro** imediatamente (fail-fast) — projetos ainda
+  por processar não são tocados — ao contrário de uma falha de provider por
+  projeto, que continua a marcar `all_ok=False` e avança para o projeto
+  seguinte (comportamento inalterado).
+  Testado manualmente: um `STOP: dangerous_command` no implementer de
+  `project-a` impede que `project-b` seja sequer chamado.
+- `WorkspaceRunOutcome.stopped_reason: str | None` → `StopReason | None`,
+  espelhando `RunOutcome` do `Engine`; todos os pontos de paragem existentes
+  (falha do planner, "um ou mais projetos falharam") passaram a construir um
+  `StopReason` estruturado em vez de uma string solta.
+- `cli.py`: `_execute_workspace` usa o mesmo `_print_stop_reason()` (com
+  escaping de markup do M6) em vez de interpolar a string diretamente;
+  `_print_run_summary` mostra o prefixo `[project] role` quando
+  `step.project_name` está definido.
+- **Bug encontrado ao testar `inspect -w` pela primeira vez (nunca tinha sido
+  exercitado):** `inspect()` chamava `worktree_path(paths, wid)`
+  incondicionalmente, que assume `paths.worktree_dir()` — método que só
+  existe em `AiPaths`, não em `WorkspacePaths` (um workitem de workspace tem
+  um worktree *por projeto*, não um único ao nível do workspace). Corrigido
+  com um `hasattr(paths, "worktree_dir")` a saltar esse bloco para workitems
+  de workspace.
+- Suite de testes: 206 → 214 (novo `tests/test_workspace_engine.py` com 6
+  testes cobrindo run/metrics, STOP fail-fast, precedência sobre veredicto,
+  summarizer best-effort; mais testes em `test_runs.py`/`test_inspect.py`).
+- Testado manualmente ponta-a-ponta com 2 repos git reais registados num
+  workspace: `STOP: dangerous_command` no implementer do primeiro projeto
+  parou o run inteiro, `status: needs_human`, `run.yml`/`metrics.yml`
+  gravados corretamente, `conductor inspect -w` mostrou tudo.
+
+---
+
 # M7 — Strategy Model and Strategy Selector
 
 ## Objetivo

@@ -124,6 +124,37 @@ def test_inspect_shows_latest_run(git_paths: AiPaths, monkeypatch):
     assert "planner" in result.output
 
 
+def test_inspect_workspace_shows_run_with_project_steps(tmp_path: Path, monkeypatch):
+    """A workspace workitem's `inspect -w` shows run history with per-project steps,
+    now that WorkspaceEngine writes run.yml/metrics.yml (fast-follow to M4)."""
+    from conductor.workitems.manager import load_workitem, save_goal
+
+    project_a = tmp_path / "project-a"
+    project_a.mkdir()
+    _git_init(project_a)
+    scaffold_ai(project_a / ".ai")
+
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["workspace", "add", str(project_a), "-w", "test-ws"]).exit_code == 0
+    assert runner.invoke(app, ["define", "-w", "test-ws", "cross-project change"]).exit_code == 0
+
+    from conductor.workspaces import load_workspace_paths
+    ws_paths = load_workspace_paths("test-ws")
+    wid = ws_paths.active_pointer.read_text(encoding="utf-8").strip()
+    wi = load_workitem(ws_paths, wid)
+    wi.goal.target_projects = ["project-a"]
+    save_goal(ws_paths, wid, wi.goal)
+
+    assert runner.invoke(app, ["approve", "-w", "test-ws"]).exit_code == 0
+    assert runner.invoke(app, ["execute", "-w", "test-ws", "--dry-run"]).exit_code == 0
+
+    result = runner.invoke(app, ["inspect", "-w", "test-ws"])
+    assert result.exit_code == 0
+    assert "run-001" in result.output
+    assert "project-a" in result.output
+    assert "planner" in result.output
+
+
 def test_inspect_runs_flag_lists_all_runs(git_paths: AiPaths, monkeypatch):
     paths = git_paths
     monkeypatch.chdir(paths.root.parent)

@@ -33,6 +33,9 @@ class StepRecord(BaseModel):
     output_path: str
     verdict: str | None = None
     looped_back: bool = False
+    #: set for workspace runs (one project's implementer/reviewer step);
+    #: None for single-repo Engine steps and for the workspace planner step.
+    project_name: str | None = None
 
 
 class RunRecord(BaseModel):

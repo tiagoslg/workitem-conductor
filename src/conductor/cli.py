@@ -516,8 +516,9 @@ def _print_run_summary(run) -> None:
     table.add_column("verdict")
     for step in run.steps:
         ok_mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
+        role = f"[dim]{step.project_name}[/dim] {step.role}" if step.project_name else step.role
         table.add_row(
-            step.role, step.provider, ok_mark,
+            role, step.provider, ok_mark,
             f"{step.duration_sec:.1f}s", step.verdict or "",
         )
     console.print(table)
@@ -655,16 +656,19 @@ def inspect(
                 )
         console.print()
 
-    wt_path = worktree_path(paths, wid)
-    if wt_path.is_dir():
-        diff_text = working_tree_diff(wt_path)
-        if diff_text and diff_text.strip():
-            console.print("[bold]Working tree diff:[/bold]")
-            console.print(diff_text.rstrip())
+    # A workspace workitem has one worktree *per project*, not a single one at
+    # the workspace level — WorkspacePaths has no worktree_dir() to ask.
+    if hasattr(paths, "worktree_dir"):
+        wt_path = worktree_path(paths, wid)
+        if wt_path.is_dir():
+            diff_text = working_tree_diff(wt_path)
+            if diff_text and diff_text.strip():
+                console.print("[bold]Working tree diff:[/bold]")
+                console.print(diff_text.rstrip())
+            else:
+                console.print("[dim]Worktree has no uncommitted changes.[/dim]")
         else:
-            console.print("[dim]Worktree has no uncommitted changes.[/dim]")
-    else:
-        console.print("[dim]No worktree present (accepted or reopened away).[/dim]")
+            console.print("[dim]No worktree present (accepted or reopened away).[/dim]")
 
 
 @app.command()
@@ -852,6 +856,7 @@ def _execute_workspace(
         provider_for,
         max_fix_iterations=ws_flow.max_fix_iterations,
         source_branch=config.source_branch,
+        flow_name=ws_flow.name,
     )
 
     mode = "[yellow]dry-run[/yellow]" if dry_run else "providers from workspace config"
@@ -932,7 +937,8 @@ def _execute_workspace(
             f"[bold]conductor accept -w {workspace}[/bold]."
         )
     else:
-        console.print(f"\n[yellow]Stopped:[/yellow] {outcome.stopped_reason}")
+        console.print()
+        _print_stop_reason(outcome.stopped_reason, indent="")
         raise typer.Exit(code=1)
 
 

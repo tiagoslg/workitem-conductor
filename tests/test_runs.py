@@ -143,3 +143,38 @@ def test_stop_reason_round_trips_through_run_yaml(paths: AiPaths):
     assert run.stop_reason.type == "secrets_access"
     assert "needs a key" in run.stop_reason.message
     assert run.stop_reason.evidence == [".env.production"]
+
+
+def test_step_record_project_name_round_trips_through_run_yaml(tmp_path: Path):
+    """StepRecord.project_name (set for WorkspaceEngine steps, None for single-repo
+    Engine steps) survives a write/read cycle."""
+    from conductor.core.runs import MetricsRecord, RunRecord, StepRecord, write_run
+
+    run = RunRecord(
+        run_id="run-001",
+        workitem_id="wi-001",
+        started_at="2026-01-01T00:00:00Z",
+        finished_at="2026-01-01T00:01:00Z",
+        status="completed",
+        flow="workspace-change",
+        steps=[
+            StepRecord(
+                index=0, role="planner", provider="dry_run", ok=True,
+                duration_sec=0.1, prompt_chars=10, output_chars=10,
+                prompt_path="outputs/00-planner.prompt.md",
+                output_path="outputs/00-planner.output.md",
+            ),
+            StepRecord(
+                index=1, role="implementer", provider="dry_run", ok=True,
+                duration_sec=0.1, prompt_chars=10, output_chars=10,
+                prompt_path="outputs/project-a/01-implementer.prompt.md",
+                output_path="outputs/project-a/01-implementer.output.md",
+                project_name="project-a",
+            ),
+        ],
+    )
+    write_run(tmp_path, run, MetricsRecord())
+
+    reloaded = load_run(tmp_path, "run-001")
+    assert reloaded.steps[0].project_name is None
+    assert reloaded.steps[1].project_name == "project-a"

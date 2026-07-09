@@ -304,8 +304,8 @@ conductor inspect --context      # + per-step prompt/output char counts
 It also shows a live `git diff --stat` of the worktree, if one still exists
 (reopened/accepted workitems won't have one).
 
-Single-repo execution only for now — `-w` (workspace) runs don't yet write
-run/metrics manifests.
+`conductor execute -w <workspace>` writes run/metrics manifests too — see
+[Cross-project workitems and workspace execution](#cross-project-workitems-and-workspace-execution).
 
 ## Memory and curated context
 
@@ -344,8 +344,12 @@ failing/unbound summarizer never blocks the reopen itself — resetting state
 has to stay reliable). `conductor inspect` shows the current memory alongside
 run history.
 
-Single-repo only for now — workspace (`-w`) execution/reopen don't get
-curated context or summarization yet.
+`conductor execute -w <workspace>` now calls the summarizer too (once at the
+end of the run, not per-project), so `memory.yml` gets populated — but
+workspace project prompts (`build_workspace_project_context`) don't consume
+that memory yet the way single-repo `build_context()` does, and
+`conductor reopen -w` still doesn't trigger summarization. Both remain
+fast-follows.
 
 ## Safety stop conditions
 
@@ -373,8 +377,14 @@ to weigh in on, not a bug.
 
 Deterministic detection of a stuck fix loop (repeated near-identical
 review/implementer output) is not implemented yet — `max_fix_iterations`
-remains the only backstop for that case. Single-repo only for now —
-`WorkspaceEngine` doesn't check for `STOP:` markers.
+remains the only backstop for that case.
+
+`conductor execute -w <workspace>` checks for the same marker on the
+planner's output and on every project's implementer/reviewer output. Unlike a
+plain provider failure (which only skips that one project and moves on to
+the next), a `STOP:` marker halts the *entire* workspace run immediately —
+projects not yet reached (or not yet started, if the planner itself raised
+it) are never touched.
 
 ## Cross-project workitems and workspace execution
 
@@ -412,6 +422,12 @@ The workspace flow runs in two phases:
 1. **Planner** once, with the combined cross-project context.
 2. **Implementer + reviewer** independently per project, each in its own
    worktree.
+
+Each `execute -w` call writes one `run.yml`/`metrics.yml` for the whole
+workspace run (planner step plus every project's steps — `conductor inspect
+-w <ws>` shows the full history) and calls the `summarizer` role once at the
+end to update the workitem's shared `memory.yml`, same as the single-repo
+engine.
 
 ### Read-only dashboard
 
@@ -517,16 +533,14 @@ across projects).
 - **Runs and metrics** — every `execute` writes `runs/<id>/run.yml` (per-step
   provider, duration, char counts, verdict) and `runs/<id>/metrics.yml`
   (aggregated context size, git diff stats, fix/reopen counts, providers
-  used), plus `conductor inspect` to view them alongside goal/state. Single-repo
-  execution only for now — workspace (`-w`) runs are a fast-follow.
+  used), plus `conductor inspect` to view them alongside goal/state.
 - **Memory, summarizer role, curated context** — a `summarizer` role curates
   `memory.yml`/`context/current_summary.md` after each run finish/stop/loop-back
   and `reopen`; `build_context()` now assembles prompts from that curated
   memory (plus a working-tree diff and the latest reviewer output) instead of
   every role's raw prior output by default, under an explicit
   `context.max_prompt_chars` budget. Raw-output inclusion stays available as
-  an opt-in for repos not yet trusting their summarizer. Single-repo only for
-  now — workspace (`-w`) execution/reopen are a fast-follow.
+  an opt-in for repos not yet trusting their summarizer.
 - **Safety stop conditions** — any role can emit a `STOP:` marker (scope
   change, secrets access, dangerous command, production access) as the first
   line of its response, checked on every step and taking priority over a
@@ -535,7 +549,15 @@ across projects).
   inspect` and the final report; `status` is `blocked` for a technical/
   provider failure and `needs_human` for everything semantic. Deterministic
   stuck-loop detection is not implemented yet — `max_fix_iterations` remains
-  the only backstop for that. Single-repo only for now.
+  the only backstop for that.
+- **`WorkspaceEngine` fast-follows** — runs/metrics recording, the
+  `summarizer` role, and `STOP:` detection now all work for
+  `conductor execute -w <workspace>` too, not just single-repo `execute`. One
+  `run.yml` covers the whole workspace run (planner + every project's steps,
+  distinguished by `StepRecord.project_name`); the summarizer is called once
+  at the end rather than per project. A `STOP:` marker from any project's
+  role halts the *entire* workspace run immediately — unlike a plain
+  provider failure, which only skips that project and moves on.
 
 ### Track A — execution
 
