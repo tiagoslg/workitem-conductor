@@ -43,6 +43,26 @@ O `opencode.db` não tem noção de "isto é a mesma unidade de trabalho de neg�
 
 Uma sprint real com **20 execution plans** espalhados por 5+ repositórios (TPA, JC, hub, care BE, care FE, selfcare), com dependências cruzadas ("depende do #17"), uma tarefa embutida sem ficheiro próprio dentro de outro plano ("Task 0"), e uma equipa externa a executar um plano sem acesso cross-repo (exigindo que esse plano fosse autossuficiente) — tudo isto tracked à mão numa tabela markdown mantida manualmente. Isto é dor real, presente, não hipotética — mais urgente do que a correlação de auditoria em si.
 
+### 1.6 Isto já foi tentado antes: lições do V4/V5 (`habit-ai-orchestrator`)
+
+`workitem-conductor` nasceu literalmente dentro de `habit-ai-orchestrator` — `docs/vision.md` e `docs/local-agent-brief.md` desse repositório têm o mesmo tagline ("Define the goal. Let agents do the loop. Review the result.") e a mesma frase de posicionamento ("It is not a coding agent. It coordinates coding agents."). Esse repositório correu em produção real durante ~6 semanas (maio–meados de junho de 2026, 90+ workitems reais, features do TPA), evoluiu de um modelo V4 pesado para um V5 deliberadamente simplificado ("use the smallest workflow that preserves safety"), e parou de ser usado a 2026-06-15 — sem uma razão registada nos commits.
+
+Confirmado pelo utilizador e verificado nos ficheiros reais:
+
+1. **Bureaucracia desproporcional ao risco.** O V5 já tentava resolver isto com perfis `quick`/`standard`/`governed`, mas o próprio scorecard de avaliação (`docs/v5-evaluation-scorecard.md`) tem um campo explícito **"Too bureaucratic: yes | no"** — o risco já era antecipado, e a perceção do utilizador ("para um pequeno bugfix o trabalho era muito grande") sugere que se materializou mesmo depois da simplificação.
+2. **Cada agente a escrever o seu próprio ficheiro de artefacto não funcionou — confirmado em dados reais.** Comparando dois workitems reais: `2026-06-11_tpaclaims-claim-action-links/` tem `task.md`/`plan.md`/`state.json`/`result.md`; `2026-05-21_tpaclaims-payment-worklist-paid-status-contract/` tem `meta.json` (não `state.json`), `request.md`, `backend_instructions.md`, `frontend_instructions.md` — nomes de ficheiro diferentes para o mesmo tipo de informação, **apesar de existir um `workitem-state.schema.json` formal**. O esquema não impediu o desvio porque nada obrigava um agente a produzir exatamente esses ficheiros com esses nomes — daí a intuição (já do próprio utilizador, à época) de mudar para algo mais estruturado, que acabou por levar ao YAML no `workitem-conductor`.
+3. **O bloco `## Workflow evaluation`** (visto embutido em `result.md` de um workitem real: `prompt_count_estimate`, `human_correction_count`, `rework_loops`, `workflow_overhead`, `confidence`, etc.) é, na prática, o mesmo objetivo da motivação "aprender a orquestrar" de hoje — só que auto-reportado por um agente em prosa estruturada, sujeito ao mesmo risco de desvio do ponto 2, em vez de derivado de dados que já existem de forma consistente.
+
+**O que isto valida no desenho de hoje, e o que corrige deliberadamente:**
+
+| V4/V5 | Desenho de hoje | Porquê |
+|---|---|---|
+| Vários ficheiros por workitem, escritos à mão por agentes diferentes (`task.md`/`plan.md`/`result.md`/`review.md`/`test.md`/...) | **Um único documento em prosa** (`execution_plan.md`) por unidade de trabalho, com frontmatter mínimo | Elimina a superfície onde o desvio de formato aconteceu — não há "vários ficheiros para manter consistentes entre si" |
+| `## Workflow evaluation` auto-reportado por um agente | Métricas (custo, tokens, modelo, nº de sessões/loop-backs) **lidas do `opencode.db`**, não escritas por um agente | O dado já existe, gerado pela própria plataforma, não depende de disciplina de um prompt para ser preenchido corretamente |
+| Perfis `quick`/`standard`/`governed` como conceito explícito, com artefactos obrigatórios por perfil | Frontmatter quase todo opcional (só `id`/`status` obrigatórios); um plano "quick" é só um plano sem `depends_on`/`sprint`/`owner_team` preenchidos — o perfil emerge dos campos usados, não é um modo à parte a manter | Evita reintroduzir a mesma escada de bureaucracia que o V5 já tentou achatar e (aparentemente) não achatou o suficiente |
+| Orquestrador como fallback, não passo obrigatório | Mesmo princípio, já adotado — o `workitem-conductor` (ferramenta) nunca executa nada, só regista/valida | Validado, sem alteração necessária |
+| `repositories: [{repo, role: primary\|changed\|verification_only\|dependency\|orchestration}]` no schema | Ainda por decidir se `depends_on`/`related` (§5) chega, ou se vale a pena um campo `repos_affected` com papel por repo, mais rico do que só `repo:` | Ideia genuinamente boa do V5 que o desenho de hoje ainda não captura — ver §7 |
+
 ---
 
 ## 2. Decisão: control plane, não execution plane
@@ -190,6 +210,7 @@ O corpo do markdown **não é estruturado** — fica em prosa livre, exatamente 
 3. **`id` como chave** — hoje os planos já usam nomes de ficheiro datados como identidade natural (`2026-07-15_...`). O `id` do frontmatter pode ser derivado do nome do ficheiro por omissão (menos fricção ao escrever) com override manual só quando necessário.
 4. **Migração dos 20 planos já existentes na sprint `claim-values`** não têm frontmatter — precisam de ser retro-adaptados manualmente ou por um script de migração one-off (não vale a pena automatizar isto de forma sofisticada, é um custo único).
 5. **Resolvido**: o `/create-plan` chama um agente `plan-writer` dedicado (§4.1), com escrita cross-repo via `bash: ask` (nunca `edit: allow`) — o `workitem-conductor` e os seus subagentes de implementação ficam inalterados, sem qualquer aumento de raio de ação. Falta só confirmar na prática se o padrão `bash: ask` gera confirmações a mais quando uma sessão escreve vários planos de seguida — se sim, considerar `"cat > */.ai/execution_plans/*": allow` como exceção pontual, mantendo tudo o resto pedido.
+6. **`repos_affected` com papel por repo** (herdado do `workitem-state.schema.json` do V4/V5 — §1.6): o schema atual só tem `repo:` (um) + `depends_on`/`related` (outros planos). Para um plano cross-repo como o `2026-06-11_tpaclaims-claim-action-links` real (7 repositórios, papéis diferentes: `primary`, `operator_frontend`, `verification_only`, `legacy_reference_only`), pode valer a pena um campo `repos_affected: [{repo, role}]` explícito, em vez de inferir o papel de cada repo a partir de `depends_on` de outros planos. Ainda por decidir — não bloqueia o resto do desenho.
 
 ---
 
