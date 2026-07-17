@@ -19,7 +19,6 @@ plain provider failure which only skips that one project.
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -31,6 +30,7 @@ from ..workitems.manager import Workitem, load_workitem, save_state
 from ..workitems.models import StopReason, utcnow_iso
 from . import stop_conditions
 from .context import build_workspace_planner_context, build_workspace_project_context
+from .planner_output import parse_planner_output
 from .review import parse_review_verdict
 from .runs import MetricsRecord, RunRecord, StepRecord, next_run_id, write_run
 from .stop_conditions import parse_stop_signal
@@ -177,9 +177,10 @@ class WorkspaceEngine:
 
         outcome.planner_ok = True
         outcome.planner_output_path = planner_output_path
-        m = re.search(r"^BRANCH:\s*(\S+)", planner_result.output or "", re.MULTILINE)
-        if m:
-            state.feature_branch = m.group(1).strip()
+        plan = parse_planner_output(planner_result.output or "")
+        run_steps[-1].plan = plan
+        if plan and plan.branch:
+            state.feature_branch = plan.branch
         state.record(f"planner completed via {planner_result.provider}")
         save_state(self.ws_paths, state)
 

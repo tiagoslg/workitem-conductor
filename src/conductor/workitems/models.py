@@ -14,6 +14,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from ..core.yaml_utils import coerce_str_list
+
 Stage = Literal[
     "defined",
     "planning",
@@ -82,24 +84,7 @@ class GoalContract(BaseModel):
     )
     @classmethod
     def _coerce_str_list(cls, v: object) -> object:
-        """Coerce non-string list items to strings.
-
-        YAML parses a list item that ends with ``:`` as a mapping key, turning
-        ``- Verify the endpoint:`` into ``{"Verify the endpoint": ...}``.
-        Round-trip the mapping through yaml.dump so the item is still readable
-        rather than raising a ValidationError that crashes ``conductor status``.
-        """
-        if not isinstance(v, list):
-            return v
-        result: list[str] = []
-        for item in v:
-            if isinstance(item, str):
-                result.append(item)
-            elif item is not None:
-                result.append(
-                    yaml.dump(item, default_flow_style=False, allow_unicode=True).strip()
-                )
-        return result
+        return coerce_str_list(v)
 
     def to_yaml(self) -> str:
         return _dump_yaml(self.model_dump())
@@ -146,6 +131,10 @@ class WorkitemState(BaseModel):
     iterations: int = 0
     fix_iterations: int = 0
     reopen_count: int = 0
+    #: descriptive only — meaningful during/after a phased-flow run
+    #: (`Flow.phase_flow` set); 0/0 for non-phased flows.
+    current_phase_index: int = 0
+    total_phases: int = 0
     feature_branch: str | None = None
     stop_reason: StopReason | None = None
     open_issues: list[str] = Field(default_factory=list)

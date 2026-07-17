@@ -22,11 +22,12 @@ def paths(tmp_path: Path) -> AiPaths:
 
 
 def test_scaffolded_builtin_strategies_load(paths: AiPaths):
-    for name in ("simple-change", "bugfix", "context-heavy-change", "phased-documentation"):
+    for name in ("simple-change", "bugfix", "context-heavy-change"):
         strategy = load_strategy(paths, name)
         assert strategy.name == name
         assert strategy.flow == "simple-change"
 
+    assert load_strategy(paths, "phased-documentation").flow == "phased-change"
     assert load_strategy(paths, "bugfix").max_fix_iterations == 2
     heavy = load_strategy(paths, "context-heavy-change")
     assert heavy.context.include_raw_outputs is True

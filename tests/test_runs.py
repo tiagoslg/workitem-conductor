@@ -8,6 +8,7 @@ from conductor.core.engine import Engine
 from conductor.core.runs import list_run_ids, load_metrics, load_run, next_run_id
 from conductor.flows.loader import load_flow
 from conductor.paths import AiPaths
+from conductor.providers.base import ProviderResult
 from conductor.providers.dryrun import DryRunProvider
 from conductor.scaffold import scaffold_ai
 from conductor.workitems.manager import approve_goal, create_workitem, reopen_workitem
@@ -51,7 +52,7 @@ def test_engine_run_writes_run_manifest(paths: AiPaths):
     assert run.reopen_number == 0
     assert run.strategy is None
     assert run.strategy_hash is None
-    assert [s.role for s in run.steps] == ["planner", "implementer", "reviewer", "validator"]
+    assert [s.role for s in run.steps] == ["planner", "implementer", "reviewer", "verifier"]
     assert all(s.ok for s in run.steps)
     assert all(s.duration_sec >= 0 for s in run.steps)
     assert all(s.prompt_chars > 0 for s in run.steps)
@@ -180,3 +181,101 @@ def test_step_record_project_name_round_trips_through_run_yaml(tmp_path: Path):
     reloaded = load_run(tmp_path, "run-001")
     assert reloaded.steps[0].project_name is None
     assert reloaded.steps[1].project_name == "project-a"
+
+
+def test_run_records_structured_output_on_the_correct_steps(paths: AiPaths):
+    """plan/review/verify are populated only on their own role's step, null
+    everywhere else."""
+    class ScriptedProvider(DryRunProvider):
+        name = "scripted"
+
+        def run(self, request):
+            if request.role == "planner":
+                return ProviderResult(
+                    ok=True,
+                    output="```yaml\nbranch: feat/x\nphases:\n  - name: p1\n```\n",
+                    provider=self.name,
+                )
+            if request.role == "reviewer":
+                return ProviderResult(
+                    ok=True,
+                    output=(
+                        "REVIEW: approved\n```yaml\nconfidence: 0.9\n"
+                        "suggested_next_role: implementer\n```\n"
+                    ),
+                    provider=self.name,
+                )
+            if request.role == "verifier":
+                return ProviderResult(
+                    ok=True,
+                    output="VERIFY: passed\n```yaml\ntests_run: true\n```\n",
+                    provider=self.name,
+                )
+            return ProviderResult(ok=True, output=f"# {request.role}\noutput", provider=self.name)
+
+    wi = create_workitem(paths, "structured output round trip")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    engine = Engine(paths, flow, provider_for=lambda role: ScriptedProvider())
+    outcome = engine.run(wi.workitem_id)
+    assert outcome.completed is True
+
+    run = load_run(wi.directory, "run-001")
+    by_role = {s.role: s for s in run.steps}
+
+    assert by_role["planner"].plan is not None
+    assert by_role["planner"].plan.branch == "feat/x"
+    assert by_role["planner"].review is None
+    assert by_role["planner"].verify is None
+
+    assert by_role["reviewer"].review is not None
+    assert by_role["reviewer"].review.confidence == 0.9
+    assert by_role["reviewer"].review.suggested_next_role == "implementer"
+    assert by_role["reviewer"].plan is None
+    assert by_role["reviewer"].verify is None
+
+    assert by_role["verifier"].verify is not None
+    assert by_role["verifier"].verify.tests_run is True
+    assert by_role["verifier"].plan is None
+    assert by_role["verifier"].review is None
+
+    assert by_role["implementer"].plan is None
+    assert by_role["implementer"].review is None
+    assert by_role["implementer"].verify is None
+
+
+def test_step_record_phase_fields_round_trip_through_run_yaml(tmp_path: Path):
+    """StepRecord.phase_index/phase_name (set for Flow.phase_flow steps, None
+    for top-level steps) survive a write/read cycle."""
+    from conductor.core.runs import MetricsRecord, RunRecord, StepRecord, write_run
+
+    run = RunRecord(
+        run_id="run-001",
+        workitem_id="wi-001",
+        started_at="2026-01-01T00:00:00Z",
+        finished_at="2026-01-01T00:01:00Z",
+        status="completed",
+        flow="phased-change",
+        steps=[
+            StepRecord(
+                index=0, role="planner", provider="dry_run", ok=True,
+                duration_sec=0.1, prompt_chars=10, output_chars=10,
+                prompt_path="outputs/00-planner.prompt.md",
+                output_path="outputs/00-planner.output.md",
+            ),
+            StepRecord(
+                index=1, role="implementer", provider="dry_run", ok=True,
+                duration_sec=0.1, prompt_chars=10, output_chars=10,
+                prompt_path="outputs/01-implementer.prompt.md",
+                output_path="outputs/01-implementer.output.md",
+                phase_index=0, phase_name="phase-one",
+            ),
+        ],
+    )
+    write_run(tmp_path, run, MetricsRecord())
+
+    reloaded = load_run(tmp_path, "run-001")
+    assert reloaded.steps[0].phase_index is None
+    assert reloaded.steps[0].phase_name is None
+    assert reloaded.steps[1].phase_index == 0
+    assert reloaded.steps[1].phase_name == "phase-one"

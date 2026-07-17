@@ -109,6 +109,38 @@ def test_inspect_shows_stop_reason(git_paths: AiPaths, monkeypatch):
     assert "migrate the DB" in inspect_result.output
 
 
+def test_inspect_shows_phase_progress(git_paths: AiPaths, monkeypatch):
+    paths = git_paths
+    monkeypatch.chdir(paths.root.parent)
+    wi = create_workitem(paths, "phased docs change")
+    approve_goal(paths, wi.workitem_id)
+
+    planner_yaml = (
+        "```yaml\\nbranch: feat/x\\nphases:\\n  - name: p1\\n  - name: p2\\n```\\n"
+    )
+    paths.repo_config.write_text(
+        "name: test\n"
+        "providers:\n"
+        "  dry: { type: dry_run }\n"
+        f"  planner_cli: {{ type: cli_one_shot, command: sh, args: [\"-c\", \"printf '{planner_yaml}'\"], prompt_via: stdin }}\n"
+        "roles:\n"
+        "  planner: { provider: planner_cli }\n"
+        "  implementer: { provider: dry }\n"
+        "  reviewer: { provider: dry }\n"
+        "  verifier: { provider: dry }\n",
+        encoding="utf-8",
+    )
+
+    assert runner.invoke(app, ["approve", "--strategy", "phased-documentation"]).exit_code == 0
+    result = runner.invoke(app, ["execute"])
+    assert result.exit_code == 0
+
+    inspect_result = runner.invoke(app, ["inspect"])
+    assert inspect_result.exit_code == 0
+    assert "phase" in inspect_result.output.lower()
+    assert "2/2" in inspect_result.output
+
+
 def test_inspect_shows_latest_run(git_paths: AiPaths, monkeypatch):
     paths = git_paths
     monkeypatch.chdir(paths.root.parent)
@@ -122,6 +154,36 @@ def test_inspect_shows_latest_run(git_paths: AiPaths, monkeypatch):
     assert result.exit_code == 0
     assert "run-001" in result.output
     assert "planner" in result.output
+
+
+def test_inspect_shows_structured_verify_details(git_paths: AiPaths, monkeypatch):
+    paths = git_paths
+    monkeypatch.chdir(paths.root.parent)
+    wi = create_workitem(paths, "verifier reports structured detail")
+    approve_goal(paths, wi.workitem_id)
+
+    paths.repo_config.write_text(
+        "name: test\n"
+        "providers:\n"
+        "  dry: { type: dry_run }\n"
+        "  verifier_cli: { type: cli_one_shot, command: sh, args: [\"-c\", "
+        "\"printf 'VERIFY: passed\\n\\x60\\x60\\x60yaml\\ntests_run: true\\nnotes:\\n  - all good\\n\\x60\\x60\\x60\\n'\"], "
+        "prompt_via: stdin }\n"
+        "roles:\n"
+        "  planner: { provider: dry }\n"
+        "  implementer: { provider: dry }\n"
+        "  reviewer: { provider: dry }\n"
+        "  verifier: { provider: verifier_cli }\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["execute"])
+    assert result.exit_code == 0
+
+    inspect_result = runner.invoke(app, ["inspect"])
+    assert inspect_result.exit_code == 0
+    assert "tests_run=True" in inspect_result.output
+    assert "all good" in inspect_result.output
 
 
 def test_inspect_shows_active_strategy(git_paths: AiPaths, monkeypatch):

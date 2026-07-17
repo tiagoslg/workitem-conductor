@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 
 import pytest
@@ -24,7 +23,7 @@ def test_load_flow(paths: AiPaths):
     flow = load_flow(paths, "simple-change")
     assert flow.name == "simple-change"
     roles = [s.role for s in flow.steps]
-    assert roles == ["planner", "implementer", "reviewer", "validator"]
+    assert roles == ["planner", "implementer", "reviewer", "verifier"]
     assert flow.max_fix_iterations == 3
 
 
@@ -57,14 +56,14 @@ def test_engine_runs_full_flow(paths: AiPaths):
     outcome = engine.run(wi.workitem_id, on_step=lambda s: seen.append(s.role))
 
     assert outcome.completed is True
-    assert [s.role for s in outcome.steps] == ["planner", "implementer", "reviewer", "validator"]
-    assert seen == ["planner", "implementer", "reviewer", "validator"]
+    assert [s.role for s in outcome.steps] == ["planner", "implementer", "reviewer", "verifier"]
+    assert seen == ["planner", "implementer", "reviewer", "verifier"]
 
     # artifacts written
     out_dir = wi.directory / "outputs"
     assert (out_dir / "00-planner.output.md").is_file()
     assert (out_dir / "00-planner.prompt.md").is_file()
-    assert (out_dir / "03-validator.output.md").is_file()
+    assert (out_dir / "03-verifier.output.md").is_file()
     assert (wi.directory / "final_report.md").is_file()
 
     # state advanced + persisted
@@ -73,7 +72,7 @@ def test_engine_runs_full_flow(paths: AiPaths):
     assert reloaded.state.stage == "completed"
     assert reloaded.state.next_action == "none"
     assert reloaded.state.step_index == 4
-    assert reloaded.state.artifacts["validator"] == "outputs/03-validator.output.md"
+    assert reloaded.state.artifacts["verifier"] == "outputs/03-verifier.output.md"
     assert reloaded.state.artifacts["final_report"] == "final_report.md"
 
     report = (wi.directory / "final_report.md").read_text()
@@ -141,7 +140,7 @@ def test_fix_loop_resolves_after_changes(paths: AiPaths):
         "planner", "implementer", "reviewer",
         "implementer", "reviewer",
         "implementer", "reviewer",
-        "validator",
+        "verifier",
     ]
 
     reloaded = load_workitem(paths, wi.workitem_id)
@@ -294,35 +293,139 @@ def test_reopen_clears_prior_stop_reason(paths: AiPaths):
     assert load_workitem(paths, wi.workitem_id).state.stop_reason is None
 
 
-# --- BRANCH: marker extraction (unit, no subprocess) ---
+# --- planner structured output reaches state.feature_branch (see also
+# tests/test_planner_output.py for the parser itself) ---
 
-_BRANCH_RE = re.compile(r"^BRANCH:\s*(\S+)", re.MULTILINE)
+def test_planner_yaml_plan_sets_feature_branch(paths: AiPaths):
+    wi = create_workitem(paths, "plan sets branch")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    provider = ScriptedRoleOutputProvider(
+        "planner",
+        "```yaml\nbranch: feat/add-slugify\nphases:\n  - name: p1\n```\n## Plan\nDo it.\n",
+    )
+    engine = Engine(paths, flow, provider_for=lambda role: provider)
+    engine.run(wi.workitem_id)
 
-
-def test_branch_marker_extracted_from_planner_output():
-    output = "BRANCH: feat/add-slugify\n\n## Objective\nAdd the helper.\n"
-    m = _BRANCH_RE.search(output)
-    assert m is not None
-    assert m.group(1) == "feat/add-slugify"
-
-
-def test_branch_marker_anywhere_in_output():
-    output = "## Plan\n\nBRANCH: feat/fix-policy-bug\n\nMore text."
-    m = _BRANCH_RE.search(output)
-    assert m is not None
-    assert m.group(1) == "feat/fix-policy-bug"
-
-
-def test_branch_marker_absent_returns_none():
-    output = "## Plan\n\nNo branch line here.\n"
-    assert _BRANCH_RE.search(output) is None
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.feature_branch == "feat/add-slugify"
 
 
-def test_branch_marker_ignores_extra_whitespace():
-    output = "BRANCH:   feat/my-feature  \n"
-    m = _BRANCH_RE.search(output)
-    assert m is not None
-    assert m.group(1).strip() == "feat/my-feature"
+def test_planner_output_without_yaml_leaves_branch_unset(paths: AiPaths):
+    wi = create_workitem(paths, "plan without branch")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    provider = ScriptedRoleOutputProvider("planner", "## Plan\nJust prose, no YAML block.\n")
+    engine = Engine(paths, flow, provider_for=lambda role: provider)
+    engine.run(wi.workitem_id)
+
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.feature_branch is None
+
+
+# --- verify gate (verifier role) ---
+
+class ScriptedVerifier(DryRunProvider):
+    """Provider whose verifier emits a scripted sequence of verdicts; all
+    other roles behave like dry-run."""
+
+    name = "scripted-verifier"
+
+    def __init__(self, verdicts):
+        self.verdicts = verdicts
+        self.verify_calls = 0
+
+    def run(self, request):
+        if request.role == "verifier":
+            verdict = self.verdicts[min(self.verify_calls, len(self.verdicts) - 1)]
+            self.verify_calls += 1
+            return ProviderResult(
+                ok=True,
+                output=f"verify body\nVERIFY: {verdict}\n",
+                provider=self.name,
+            )
+        return ProviderResult(ok=True, output=f"# {request.role}\noutput", provider=self.name)
+
+
+def test_verify_gate_loops_back_to_implementer_then_passes(paths: AiPaths):
+    wi = create_workitem(paths, "verify fails then passes")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    verifier = ScriptedVerifier(["failed", "passed"])
+
+    engine = Engine(paths, flow, provider_for=lambda role: verifier)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is True
+    roles = [s.role for s in outcome.steps]
+    assert roles == [
+        "planner", "implementer", "reviewer", "verifier",
+        "implementer", "reviewer", "verifier",
+    ]
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.fix_iterations == 1
+    assert reloaded.state.status == "completed"
+
+
+def test_verify_gate_shares_fix_budget_with_review_gate(paths: AiPaths):
+    """A prior review loop-back and a verify loop-back share one fix_iterations
+    counter, not two separate budgets."""
+    wi = create_workitem(paths, "review then verify both loop back")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")  # max_fix_iterations = 3
+
+    class Scripted(DryRunProvider):
+        name = "scripted-both"
+
+        def __init__(self):
+            self.review_calls = 0
+            self.verify_calls = 0
+
+        def run(self, request):
+            if request.role == "reviewer":
+                verdict = "changes_requested" if self.review_calls == 0 else "approved"
+                self.review_calls += 1
+                return ProviderResult(ok=True, output=f"REVIEW: {verdict}\n", provider=self.name)
+            if request.role == "verifier":
+                verdict = "failed" if self.verify_calls == 0 else "passed"
+                self.verify_calls += 1
+                return ProviderResult(ok=True, output=f"VERIFY: {verdict}\n", provider=self.name)
+            return ProviderResult(ok=True, output=f"# {request.role}\noutput", provider=self.name)
+
+    provider = Scripted()
+    engine = Engine(paths, flow, provider_for=lambda role: provider)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is True
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.fix_iterations == 2
+
+
+def test_verify_gate_unknown_treated_as_passed(paths: AiPaths):
+    # dry-run verifier emits no VERIFY: marker -> unknown -> treated as passed
+    wi = create_workitem(paths, "dry passes verify gate")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")
+    engine = Engine(paths, flow, provider_for=lambda role: DryRunProvider())
+    outcome = engine.run(wi.workitem_id)
+    assert outcome.completed is True
+    assert load_workitem(paths, wi.workitem_id).state.fix_iterations == 0
+
+
+def test_verify_gate_exhausts_max_fix_iterations(paths: AiPaths):
+    wi = create_workitem(paths, "verify never passes")
+    approve_goal(paths, wi.workitem_id)
+    flow = load_flow(paths, "simple-change")  # max_fix_iterations = 3
+    verifier = ScriptedVerifier(["failed"])  # never passes
+
+    engine = Engine(paths, flow, provider_for=lambda role: verifier)
+    outcome = engine.run(wi.workitem_id)
+
+    assert outcome.completed is False
+    assert outcome.stopped_reason.type == "fix_loop_exhausted"
+    reloaded = load_workitem(paths, wi.workitem_id)
+    assert reloaded.state.status == "needs_human"
+    assert reloaded.state.fix_iterations == 3
 
 
 # --- summarizer trigger points ---

@@ -91,6 +91,7 @@ can be committed alongside the code it configures:
   repo.yml                 # repo config; role → provider mapping (versioned)
   instructions.md          # repo-specific guidance (versioned)
   flows/simple-change.yml  # the default flow (versioned)
+  flows/phased-change.yml  # per-phase implement+review, single final verify
   strategies/              # named flow+role+context+budget bundles (see "Strategies")
     simple-change.yml
     bugfix.yml
@@ -99,6 +100,7 @@ can be committed alongside the code it configures:
   roles/planner.md         # provider-neutral role prompts (versioned)
   roles/implementer.md
   roles/reviewer.md
+  roles/verifier.md
   roles/refiner.md
 ```
 
@@ -233,6 +235,94 @@ there's no point to reselect from yet). `--strategy` is rejected outright
 with `-w` (`define -w ... --strategy ...` / `approve -w ... --strategy ...`
 both exit with an error) rather than silently accepted and ignored.
 
+## Structured role output
+
+The **planner**'s output is a fenced YAML block up front (`branch`/`phases`/
+`risk_level` — see "Feature branch from the planner" below), followed by the
+plan in prose. `phases` is always recorded (in `state.yml`/`run.yml`), but
+only actually *drives* phase-by-phase execution for flows that opt in — see
+[Phased execution](#phased-execution).
+
+The **reviewer** still gates the fix loop with a single `REVIEW:
+approved|changes_requested` line, unchanged — but can optionally follow it
+with a fenced YAML block:
+
+```yaml
+confidence: 0.8
+blocking_issues:
+  - the null check is missing on the new endpoint
+non_blocking_issues:
+  - could rename this variable for clarity
+suggested_next_role: implementer
+```
+
+This is purely informational: it's recorded in `run.yml` and shown in
+`conductor inspect`, but `suggested_next_role` doesn't currently override the
+flow's own loop-back target (`on_changes`).
+
+The **verifier** role runs after the reviewer approves, and is a real gate:
+
+```yaml
+tests_run: true
+tests_passed: true
+acceptance_criteria_met: true
+notes:
+  - ran the full suite, all green
+```
+
+preceded by `VERIFY: passed|failed`. A `failed` verdict loops back to the
+implementer exactly like the reviewer's `changes_requested` — sharing the
+same `max_fix_iterations` budget, not a separate counter. An absent `VERIFY:`
+line (e.g. a dry-run provider) is treated as `passed`, same permissive
+posture as an absent `REVIEW:` line. The verifier is single-repo only for
+now — `conductor execute -w` doesn't have a verifier step in its flow yet.
+
+## Phased execution
+
+`simple-change` always runs one implementer → reviewer → verifier pass over
+the whole plan, regardless of how many phases the planner identified —
+`phases` is recorded but doesn't change control flow for that flow. A flow
+opts into real phase-by-phase execution with a `phase_flow`:
+
+```yaml
+# .ai/flows/phased-change.yml
+name: phased-change
+steps:
+  - role: planner
+    stage: planning
+  - role: verifier
+    stage: verifying
+    gate: verify
+    on_changes: implementer
+phase_flow:               # walked once per planner phase
+  - role: implementer
+    stage: implementing
+  - role: reviewer
+    stage: reviewing
+    gate: review
+    on_changes: implementer
+max_fix_iterations: 3
+```
+
+The `phased-documentation` strategy uses this flow — pick it explicitly
+(`conductor define ... --strategy phased-documentation`) or let the docs
+rule in the selector pick it. For each phase, the implementer/reviewer run
+in sequence with a `## Current phase` section in their prompt (name, goal,
+files likely touched) instead of the whole plan; a `changes_requested` loops
+back within that phase only. Every phase's fix loop shares the same
+`fix_iterations`/`max_fix_iterations` budget — one counter across the whole
+run, not one per phase. The **verifier still runs once**, after every phase
+has completed, not per phase; if it fails, the conductor redoes just the
+*last* phase (its implementer/reviewer) rather than restarting the whole
+plan, since the verifier's `on_changes: implementer` target only exists
+inside `phase_flow`. If the planner emits no phases at all, `phase_flow`
+still runs once against an implicit single phase rather than doing nothing.
+
+`conductor inspect` shows `phase N/M` alongside the usual stage/status once
+a phased run has started; `run.yml`/`conductor execute`'s live output tag
+each `phase_flow` step with its phase name, the same way workspace runs tag
+steps with a project name.
+
 ## Git workflow
 
 `conductor execute` creates an isolated **git worktree** under the central
@@ -257,13 +347,18 @@ Accept does, in order:
 
 ### Feature branch from the planner
 
-The planner can emit a `BRANCH:` directive on its own line:
+The planner's output is a fenced YAML block (see "Structured role output"
+below) with a `branch` field:
 
-```
-BRANCH: feat/fix-policy-discovery
+```yaml
+branch: feat/fix-policy-discovery
+phases:
+  - name: locate-the-bug
+    goal: find where policy discovery reads the wrong config key
+risk_level: low
 ```
 
-The conductor saves this name in state. At `accept` time it creates a local
+The conductor saves `branch` in state. At `accept` time it creates a local
 branch pointing to the committed tip — ready for a PR to `main` — while the
 merge itself goes into `target_branch` (typically `develop`).
 
@@ -579,9 +674,10 @@ across projects).
 - **Branch strategy config** — `source_branch` / `target_branch` in `repo.yml`
   so worktrees always branch from (e.g.) `main` and `accept` always merges into
   `develop`, regardless of current HEAD.
-- **Feature branch from planner** — planner emits `BRANCH: feat/...`; conductor
-  saves it in state and creates a local branch at `accept` time. Commit messages
-  follow the Conventional Commits format derived from the branch prefix.
+- **Feature branch from planner** — planner emits a `branch` field in its
+  structured YAML output; conductor saves it in state and creates a local
+  branch at `accept` time. Commit messages follow the Conventional Commits
+  format derived from the branch prefix.
 - **`conductor reopen "<reason>"`** — resets `step_index` and injects
   `reopen.md` as planner context. `--from <role>` restarts from a specific step.
   Worktree and feature branch are left intact.
@@ -633,6 +729,21 @@ across projects).
   content hash of it. Single-repo only for now — `WorkspaceEngine` doesn't
   select a strategy yet, and reselecting after a `reopen` is deferred (no
   `approve` step to hook into).
+- **Structured role output** — the planner's `BRANCH:` line was replaced
+  outright by a fenced YAML block (`branch`/`phases`/`risk_level`, see
+  [Structured role output](#structured-role-output)); the reviewer keeps its
+  `REVIEW:` gate unchanged but can add an optional YAML block
+  (`confidence`/`blocking_issues`/`non_blocking_issues`/
+  `suggested_next_role`, informational only); and a new **`verifier`** role
+  runs after the reviewer with its own `VERIFY: passed|failed` gate — a
+  `failed` verdict loops back to the implementer, sharing the same
+  `max_fix_iterations` budget as the review gate rather than a separate
+  counter. Verifier is single-repo only for now.
+- **Phased execution** — a flow can declare a `phase_flow` (see [Phased
+  execution](#phased-execution)) walked once per planner phase; `simple-change`
+  is unaffected (opt-in only), `phased-documentation` uses it. All phases'
+  fix loops share one budget; the verifier still runs once at the end, and
+  redoes just the last phase (not the whole plan) if it fails.
 
 ### Track A — execution
 

@@ -8,7 +8,6 @@ the direction is visible without pretending to do work.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import threading
@@ -579,12 +578,49 @@ def _print_run_summary(run) -> None:
     for step in run.steps:
         ok_mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
         role = f"[dim]{step.project_name}[/dim] {step.role}" if step.project_name else step.role
+        if step.phase_name:
+            role = f"[dim]phase {(step.phase_index or 0) + 1}: {step.phase_name}[/dim] {role}"
         table.add_row(
             role, step.provider, ok_mark,
             f"{step.duration_sec:.1f}s", step.verdict or "",
         )
     console.print(table)
     console.print(f"  [dim]{run.started_at} → {run.finished_at}[/dim]")
+    for step in run.steps:
+        if step.plan and (step.plan.phases or step.plan.risk_level):
+            if step.plan.risk_level:
+                console.print(f"  [dim]plan risk:[/dim] {_escape_markup(step.plan.risk_level)}")
+            for phase in step.plan.phases:
+                console.print(f"  [dim]phase:[/dim] {_escape_markup(phase.name)}")
+        if step.review and (
+            step.review.confidence is not None
+            or step.review.blocking_issues
+            or step.review.non_blocking_issues
+            or step.review.suggested_next_role
+        ):
+            if step.review.confidence is not None:
+                console.print(f"  [dim]review confidence:[/dim] {step.review.confidence}")
+            for issue in step.review.blocking_issues:
+                console.print(f"    [red]blocking:[/red] {_escape_markup(issue)}")
+            for issue in step.review.non_blocking_issues:
+                console.print(f"    [dim]non-blocking:[/dim] {_escape_markup(issue)}")
+            if step.review.suggested_next_role:
+                console.print(
+                    f"  [dim]suggested next role:[/dim] {_escape_markup(step.review.suggested_next_role)}"
+                )
+        if step.verify and (
+            step.verify.tests_run is not None
+            or step.verify.tests_passed is not None
+            or step.verify.acceptance_criteria_met is not None
+            or step.verify.notes
+        ):
+            console.print(
+                f"  [dim]verify:[/dim] tests_run={step.verify.tests_run} "
+                f"tests_passed={step.verify.tests_passed} "
+                f"acceptance_criteria_met={step.verify.acceptance_criteria_met}"
+            )
+            for note in step.verify.notes:
+                console.print(f"    [dim]-[/dim] {_escape_markup(note)}")
     if run.stop_reason:
         _print_stop_reason(run.stop_reason)
 
@@ -637,6 +673,8 @@ def inspect(
         table.add_row("strategy", state.strategy)
     table.add_row("stage", f"[cyan]{state.stage}[/cyan]")
     table.add_row("status", f"[yellow]{state.status}[/yellow]")
+    if state.total_phases:
+        table.add_row("phase", f"{state.current_phase_index + 1}/{state.total_phases}")
     table.add_row("next action", state.next_action)
     table.add_row("iterations", str(state.iterations))
     table.add_row("fix iterations", str(state.fix_iterations))
@@ -848,19 +886,23 @@ def execute(
         rel = step.output_path.relative_to(wi.directory).as_posix()
         extra = ""
         if step.verdict and step.verdict != "unknown":
-            color = "green" if step.verdict == "approved" else "yellow"
+            color = "green" if step.verdict in ("approved", "passed") else "yellow"
             extra = f" [{color}]{step.verdict}[/{color}]"
             if step.looped_back:
                 extra += " [dim]↩ fixing[/dim]"
+        phase_prefix = (
+            f"[dim]phase {(step.phase_index or 0) + 1}: {_escape_markup(step.phase_name)}[/dim] "
+            if step.phase_name else ""
+        )
         console.print(
-            f"  {mark} {step.role} [dim]({step.stage} · {step.provider} · {elapsed:.0f}s)[/dim] → {rel}{extra}"
+            f"  {mark} {phase_prefix}{step.role} [dim]({step.stage} · {step.provider} · {elapsed:.0f}s)[/dim] → {rel}{extra}"
         )
 
-        if step.role == "planner" and step.ok:
-            output = step.output_path.read_text(encoding="utf-8")
-            m = re.search(r"^BRANCH:\s*(\S+)", output, re.MULTILINE)
-            if m:
-                console.print(f"\n  [dim]Feature branch:[/dim] [bold]{m.group(1).strip()}[/bold] [dim](created on accept)[/dim]")
+        if step.role == "planner" and step.ok and step.plan and step.plan.branch:
+            console.print(
+                f"\n  [dim]Feature branch:[/dim] [bold]{_escape_markup(step.plan.branch)}[/bold] "
+                f"[dim](created on accept)[/dim]"
+            )
 
     try:
         with spinner:
@@ -1377,7 +1419,7 @@ _CLI_DEFAULTS: dict[str, dict] = {
     "qwen":      {"type": "cli_one_shot", "command": "qwen", "args": ["--approval-mode", "yolo"], "prompt_via": "arg", "timeout": 3600},
     "codex":     {"type": "cli_one_shot", "command": "codex", "args": [], "prompt_via": "stdin", "timeout": 3600},
 }
-_KNOWN_ROLES = ("refiner", "planner", "implementer", "reviewer", "validator")
+_KNOWN_ROLES = ("refiner", "planner", "implementer", "reviewer", "verifier")
 
 
 def _detect_available_clis() -> list[str]:

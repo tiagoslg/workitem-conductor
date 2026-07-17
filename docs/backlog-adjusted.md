@@ -926,6 +926,60 @@ Só avança para próxima fase se a atual for aprovada.
 
 ---
 
+## Estado (2026-07-16): implementado — itens 42-44 concluídos
+
+Itens 40-41 (planner emite fases, parser) já tinham sido feitos pelo M9
+(feito antes, de propósito — ver a nota nesse milestone) via
+`core/planner_output.py::PlannerPlan`/`parse_planner_output`, mas sem
+qualquer efeito no control flow. O trabalho real do M8 era só os itens
+42-44: fazer o engine executar mesmo fase a fase.
+
+- **Opt-in via flow, não automático.** `simple-change` continua exatamente
+  igual (plano com `phases:` continua só gravado para visibilidade). Nova
+  `flows/phased-change.yml` — `Flow` ganha um campo `phase_flow:
+  list[FlowStep] | None`, uma sub-sequência separada (mesma forma de
+  `FlowStep`) que o engine percorre uma vez por fase, entre o `planner` e o
+  `verifier` de `steps`. `phased-documentation` (o placeholder do M7)
+  passou a apontar `flow: phased-change` — é o payoff real desse
+  placeholder.
+- **Um orçamento partilhado** `fix_iterations`/`max_fix_iterations` entre
+  todas as fases — mesma precedência do M9 (review+verify a partilhar um
+  contador). Um loop-back na fase 1 e outro na fase 2 gastam do mesmo
+  orçamento, não um por fase.
+- **Verifier corre só uma vez, no fim**, depois de todas as fases — não por
+  fase. Corresponde literalmente ao item 44 (só menciona o reviewer).
+- **Caso especial: falha do verifier num flow com fases.** O `on_changes:
+  implementer` do verifier aponta para um role que só existe em
+  `phase_flow`, não em `steps`. Em vez de um jump inválido, o engine deteta
+  isto e refaz só a **última fase** (implementer→reviewer), não o plano
+  inteiro — `Engine._redo_last_phase_after_verify_failure`, que chama
+  `_run_phases(..., only_last=True)`.
+- **Refactor de reuso**: `_execute_step()` (construir contexto, chamar
+  provider, escrever artefactos, StepOutcome/StepRecord) e
+  `_handle_terminal_checks()` (falha de provider / `STOP:`) foram extraídos
+  do loop principal para serem partilhados pelo novo loop de fases —
+  evita uma terceira cópia dessa lógica. `_handle_gate_failure` generalizado
+  para aceitar `steps`/`set_step_index` (em vez de mexer sempre em
+  `state.step_index`), para funcionar tanto no loop de topo como num índice
+  local dentro de uma fase.
+- **Contexto por fase (item 43)**: `build_context()` ganhou
+  `current_phase: PlannerPhase | None` — nova secção "## Current phase"
+  (nome/goal/files_likely_touched) para um step de `phase_flow`. Não havia
+  nenhuma secção de "plano completo" para suprimir — o plano nunca tinha
+  sido injetado no contexto do implementer antes do M8, só ficava em
+  `StepOutcome`/`StepRecord`.
+- **Fallback**: se o planner não emitir `phases:` (lista vazia) num flow com
+  `phase_flow`, o engine corre `phase_flow` uma vez contra uma fase
+  implícita única, em vez de não fazer nada.
+- Suite de testes: 255 → 263 (`tests/test_phased_execution.py` novo — 6
+  testes: caminho feliz com 2 fases, loop-back do reviewer fica só na sua
+  fase, orçamento partilhado entre duas fases, falha do verifier refaz só a
+  última fase, fallback de fases vazias, flow não-faseado inalterado — mais
+  extensões a `test_runs.py`/`test_inspect.py`/`test_init.py`).
+- `WorkspaceEngine` não foi tocado — sem flows faseados aí ainda.
+
+---
+
 # M9 — Structured Roles and Verifier/Integrator
 
 ## Objetivo
@@ -984,6 +1038,72 @@ Especialmente para workspace multi-repo:
 ### 49. Criar role `decomposer`
 
 Quebra workitem grande em fases/subtasks.
+
+---
+
+## Estado (2026-07-16): implementado — itens 45-47 concluídos
+
+M9 foi feito **antes** do M8, invertendo a ordem do backlog: o item 46
+(planner estruturado) já inclui uma lista `phases:`, exatamente o que o M8
+precisa para consumir para execução real por fases — construir primeiro o
+formato de texto ad hoc do M8 (`PHASE 1: ...`) e depois deitá-lo fora quando
+o M9 chegasse seria trabalho perdido.
+
+- **Item 45 — output estruturado do reviewer.** A linha `REVIEW:
+  approved|changes_requested` mantém-se inalterada — continua a única coisa
+  que decide o gate (`parse_review_verdict` intocado) — e passou a aceitar
+  um bloco YAML opcional a seguir com `confidence`/`blocking_issues`/
+  `non_blocking_issues`/`suggested_next_role` (`core/review.py::
+  ReviewDetails`/`parse_review_details`). **Puramente informativo** nesta
+  fase: `suggested_next_role` é gravado em `run.yml` e mostrado no
+  `conductor inspect`, mas não substitui o `on_changes` do flow — decisão
+  confirmada com o utilizador, mesmo padrão do M7 ("especificado mas ainda
+  não ligado", documentado em vez de escondido).
+- **Item 46 — output estruturado do planner.** `BRANCH: feat/<slug>`
+  **substituído por inteiro** por um bloco YAML fenced (`branch`/`phases`/
+  `risk_level`) — decisão confirmada com o utilizador de ir por uma quebra
+  limpa, sem fallback para o `BRANCH:` antigo. `core/planner_output.py`
+  (novo): `PlannerPlan`/`PlannerPhase`/`parse_planner_output`, usando
+  `core/yaml_utils.py::extract_fenced_yaml` (o mesmo utilitário já partilhado
+  pelo `summarizer`). Aplica-se aos dois motores — `Engine` e
+  `WorkspaceEngine` já liam `BRANCH:` de forma idêntica, por isso os dois
+  precisavam de trocar o parser de qualquer forma. **Quebra de
+  compatibilidade real**: repositórios com `roles/planner.md` já
+  escafoldado à mão não são atualizados automaticamente (scaffold é
+  aditivo/idempotente) — mesma precedência de "clean break, no migration"
+  do M1/M3.
+- **Item 47 — novo role `verifier`.** Gate bloqueante desde o primeiro dia
+  (decisão confirmada com o utilizador) — `gate: verify` com o mesmo
+  formato do gate de review: linha `VERIFY: passed|failed`
+  (`core/verify.py::parse_verify_verdict`, "unknown" tratado como "passed",
+  mesma postura permissiva do reviewer) mais um bloco YAML opcional
+  (`tests_run`/`tests_passed`/`acceptance_criteria_met`/`notes`). Ocupa o
+  espaço já reservado (mas nunca implementado) pelo passo `validator` no
+  `simple-change.yml` scaffolded — não era um slot novo, era uma referência
+  pendente por resolver. Ao falhar, o verifier faz loop-back para o
+  implementer partilhando o **mesmo orçamento** `fix_iterations`/
+  `max_fix_iterations` do gate de review, não um contador à parte
+  (`Engine._handle_gate_failure`, extraído do código do gate de review para
+  ser reutilizado pelos dois gates). **Só no `Engine` single-repo** — mesma
+  precedência "single-repo first" do M3-M7; `WorkspaceEngine` não ganhou
+  slot de verifier nesta fase (`workspace-change.yml` fica sem alteração).
+- **Itens 48-49 (`integrator`, `decomposer`) ficam fora de escopo** desta
+  passagem — o `integrator` é especificamente para cenários multi-repo
+  (não faz sentido antes do `WorkspaceEngine` ganhar mais paridade) e o
+  `decomposer` sobrepõe-se conceptualmente ao que o M8 já vai fazer com o
+  `phases:` do planner. Deliberadamente deferidos, não escondidos.
+- Suite de testes: 234 → 255 (`tests/test_planner_output.py` novo,
+  `tests/test_verify.py` novo, extensões a `tests/test_review.py`,
+  `tests/test_engine.py` — gate de verify com loop-back, orçamento
+  partilhado com o gate de review, "unknown" tratado como passed,
+  exaustão via verify —, `tests/test_workspace_engine.py`, `tests/test_runs.py`
+  e `tests/test_inspect.py`).
+- Testado manualmente ponta-a-ponta com providers `cli_one_shot` reais: um
+  planner a emitir `branch`/`phases`/`risk_level` grava corretamente em
+  `state.feature_branch` e em `run.yml`; um verifier a emitir `VERIFY:
+  failed` seguido de `VERIFY: passed` faz um único loop-back ao implementer
+  e depois conclui; `conductor inspect` mostra os campos estruturados de
+  planner/reviewer/verifier quando presentes.
 
 ---
 

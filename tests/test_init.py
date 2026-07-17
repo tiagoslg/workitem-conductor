@@ -11,6 +11,7 @@ EXPECTED = {
     "repo.yml",
     "instructions.md",
     "flows/simple-change.yml",
+    "flows/phased-change.yml",
     "strategies/simple-change.yml",
     "strategies/bugfix.yml",
     "strategies/context-heavy-change.yml",
@@ -18,6 +19,7 @@ EXPECTED = {
     "roles/planner.md",
     "roles/implementer.md",
     "roles/reviewer.md",
+    "roles/verifier.md",
     "roles/refiner.md",
     "roles/summarizer.md",
 }

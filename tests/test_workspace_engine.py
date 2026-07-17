@@ -110,6 +110,28 @@ def test_execute_writes_run_and_metrics_with_project_steps(ws_paths: WorkspacePa
     assert metrics.providers["project-a:implementer"] == "dry_run"
 
 
+def test_planner_yaml_plan_sets_feature_branch_in_workspace(ws_paths: WorkspacePaths):
+    """Same structured planner format as the single-repo Engine — see
+    tests/test_planner_output.py for the parser itself."""
+    wid = _make_workitem(ws_paths)
+    provider = ScriptedRoleOutputProvider(
+        "planner",
+        "```yaml\nbranch: feat/cross-project-thing\nphases:\n  - name: p1\n```\n## Plan\n",
+    )
+    engine = WorkspaceEngine(ws_paths, provider_for=lambda role: provider)
+    outcome = engine.run(wid)
+    assert outcome.completed is True
+
+    wi = load_workitem(ws_paths, wid)
+    assert wi.state.feature_branch == "feat/cross-project-thing"
+
+    run = load_run(wi.directory, "run-001")
+    planner_step = next(s for s in run.steps if s.role == "planner")
+    assert planner_step.plan is not None
+    assert planner_step.plan.branch == "feat/cross-project-thing"
+    assert planner_step.plan.phases[0].name == "p1"
+
+
 def test_stop_marker_from_project_implementer_halts_entire_workspace_run(
     ws_paths: WorkspacePaths,
 ):

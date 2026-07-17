@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from ..config.models import ContextConfig
 from ..paths import AiPaths
 from ..workitems.manager import Workitem, load_memory
+from .planner_output import PlannerPhase
 from .runs import StepRecord
 from .worktree import working_tree_diff
 
@@ -186,6 +187,17 @@ def _last_review_section(workitem: Workitem) -> str | None:
     return "\n## Latest reviewer output\n\n" + text.rstrip() + "\n"
 
 
+def _phase_section(phase: PlannerPhase) -> str:
+    """The current phase only — not the full plan — for a phase_flow step."""
+    parts = [f"\n## Current phase\n\n- name: {phase.name}"]
+    if phase.goal:
+        parts.append(f"- goal: {phase.goal}")
+    if phase.files_likely_touched:
+        parts.append("- files likely touched:")
+        parts.extend(f"  - {f}" for f in phase.files_likely_touched)
+    return "\n".join(parts)
+
+
 def build_workspace_planner_context(ws_paths: "WorkspacePaths", workitem: Workitem) -> str:
     """Compose the planner prompt for a workspace workitem (cross-project).
 
@@ -270,6 +282,7 @@ def build_context(
     *,
     context_config: ContextConfig | None = None,
     execution_cwd: Path | None = None,
+    current_phase: PlannerPhase | None = None,
 ) -> str:
     """Compose the full prompt text for ``role`` on ``workitem``.
 
@@ -278,7 +291,9 @@ def build_context(
     same values as an unset ``context:`` block in ``repo.yml``. Optional
     sections (memory, diff, last review, raw outputs) are budget-trimmed from
     the tail if needed — the fixed prefix (role/goal/reopen reason) and the
-    trailing task instruction are never truncated.
+    trailing task instruction are never truncated. ``current_phase``, set for
+    a ``Flow.phase_flow`` step, adds a "## Current phase" section scoping the
+    role to just that phase rather than the whole plan.
     """
     cfg = context_config or ContextConfig()
 
@@ -297,6 +312,8 @@ def build_context(
 
     # Ordered most to least essential — the tail is what gets trimmed under budget.
     optional_parts: list[str] = []
+    if current_phase is not None:
+        optional_parts.append(_phase_section(current_phase))
     if cfg.include_memory:
         section = _memory_section(paths, workitem)
         if section:

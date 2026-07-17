@@ -132,7 +132,7 @@ def test_strategy_role_override_changes_which_provider_runs(git_paths: AiPaths, 
         "  planner: { provider: dry }\n"
         "  implementer: { provider: default_impl }\n"
         "  reviewer: { provider: dry }\n"
-        "  validator: { provider: dry }\n",
+        "  verifier: { provider: dry }\n",
         encoding="utf-8",
     )
     (paths.strategies_dir / "override-impl.yml").write_text(
@@ -174,7 +174,7 @@ def test_strategy_max_fix_iterations_overrides_flow_default(git_paths: AiPaths, 
         "  planner: { provider: dry }\n"
         "  implementer: { provider: dry }\n"
         "  reviewer: { provider: always_changes }\n"
-        "  validator: { provider: dry }\n",
+        "  verifier: { provider: dry }\n",
         encoding="utf-8",
     )
     (paths.strategies_dir / "tight-fix-loop.yml").write_text(

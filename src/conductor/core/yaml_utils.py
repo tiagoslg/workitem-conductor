@@ -49,6 +49,28 @@ def preprocess_yaml(text: str) -> str | None:
         return None
 
 
+def coerce_str_list(v: object) -> object:
+    """Coerce non-string list items to strings, for use in pydantic field validators.
+
+    YAML parses a list item that ends with ``:`` as a mapping key, turning
+    ``- Verify the endpoint:`` into ``{"Verify the endpoint": ...}``.
+    Round-trip the mapping through ``yaml.dump`` so the item is still
+    readable rather than raising a ``ValidationError`` that crashes the
+    caller (e.g. ``conductor status``).
+    """
+    if not isinstance(v, list):
+        return v
+    result: list[str] = []
+    for item in v:
+        if isinstance(item, str):
+            result.append(item)
+        elif item is not None:
+            result.append(
+                yaml.dump(item, default_flow_style=False, allow_unicode=True).strip()
+            )
+    return result
+
+
 def extract_fenced_yaml(
     after: str, valid: Callable[[dict], bool] = lambda d: True
 ) -> dict | None:

@@ -9,7 +9,6 @@ loop) until the reviewer approves or a stop condition is hit.
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -18,15 +17,17 @@ from pathlib import Path
 from ..config.models import ContextConfig
 from ..flows.models import Flow, FlowStep
 from ..paths import AiPaths
-from ..providers.base import Provider, ProviderRequest
+from ..providers.base import Provider, ProviderRequest, ProviderResult
 from ..workitems.manager import Workitem, load_workitem, save_state
 from ..workitems.models import StopReason, WorkitemState, utcnow_iso
 from . import stop_conditions
 from .context import build_context
-from .review import parse_review_verdict
+from .planner_output import PlannerPhase, PlannerPlan, parse_planner_output
+from .review import ReviewDetails, parse_review_details, parse_review_verdict
 from .runs import MetricsRecord, RunRecord, StepRecord, next_run_id, write_run
-from .stop_conditions import parse_stop_signal
+from .stop_conditions import StopDecision, parse_stop_signal
 from .summarize import summarize
+from .verify import VerifyDetails, parse_verify_details, parse_verify_verdict
 from .worktree import diff_stat
 
 #: Resolves the provider to use for a given role. Built from repo.yml by the
@@ -52,10 +53,19 @@ class StepOutcome:
     prompt_path: Path
     output_path: Path
     error: str | None = None
-    #: for review-gated steps: "approved" | "changes_requested" | "unknown"
+    #: for gated steps: "approved"/"changes_requested"/"unknown" (review gate)
+    #: or "passed"/"failed"/"unknown" (verify gate)
     verdict: str | None = None
     #: True when this step's verdict sent the loop back for a fix
     looped_back: bool = False
+    #: structured output, populated only on the step where it's relevant
+    #: (planner/reviewer/verifier respectively); None elsewhere.
+    plan: PlannerPlan | None = None
+    review: ReviewDetails | None = None
+    verify: VerifyDetails | None = None
+    #: set for a phase_flow step (Flow.phase_flow); None for top-level steps.
+    phase_index: int | None = None
+    phase_name: str | None = None
 
 
 @dataclass
@@ -104,6 +114,7 @@ class Engine:
         run_id = next_run_id(wi.directory)
         started_at = utcnow_iso()
         run_steps: list[StepRecord] = []
+        plan: PlannerPlan | None = None  # set once the planner step completes
 
         state.status = "running"
         save_state(self.paths, state)
@@ -119,86 +130,16 @@ class Engine:
 
             step = self.flow.steps[state.step_index]
             seq = state.iterations  # global, monotonic — preserves fix history
-            provider = self.provider_for(step.role)
-
-            prompt = build_context(
-                self.paths, wi, step.role,
-                context_config=self.context_config,
-                execution_cwd=self._execution_cwd,
-            )
-            prompt_path = outputs_dir / f"{seq:02d}-{step.role}.prompt.md"
-            output_path = outputs_dir / f"{seq:02d}-{step.role}.output.md"
-            prompt_path.write_text(prompt, encoding="utf-8")
-            if on_step_start:
-                on_step_start(step.role, provider.name)
-            t0 = time.monotonic()
-            result = provider.run(
-                ProviderRequest(
-                    role=step.role,
-                    prompt=prompt,
-                    workitem_id=workitem_id,
-                    cwd=self._execution_cwd,
-                    on_output=on_step_output,
-                )
-            )
-            duration_sec = time.monotonic() - t0
-            output_path.write_text(result.output, encoding="utf-8")
-
-            step_outcome = StepOutcome(
-                index=seq,
-                role=step.role,
-                stage=step.stage,
-                provider=result.provider,
-                ok=result.ok,
-                prompt_path=prompt_path,
-                output_path=output_path,
-                error=result.error,
+            step_outcome, step_record, result = self._execute_step(
+                step, wi, state, outputs_dir, seq, workitem_id,
+                on_step_start, on_step_output,
             )
             outcome.steps.append(step_outcome)
-            run_steps.append(
-                StepRecord(
-                    index=seq,
-                    role=step.role,
-                    provider=result.provider,
-                    ok=result.ok,
-                    duration_sec=round(duration_sec, 2),
-                    prompt_chars=len(prompt),
-                    output_chars=len(result.output),
-                    prompt_path=prompt_path.relative_to(wi.directory).as_posix(),
-                    output_path=output_path.relative_to(wi.directory).as_posix(),
-                )
-            )
+            run_steps.append(step_record)
 
-            state.artifacts[step.role] = output_path.relative_to(wi.directory).as_posix()
-            state.stage = step.stage
-            state.iterations += 1
-
-            if not result.ok:
-                self._stop(
-                    wi,
-                    outcome,
-                    StopReason(
-                        type="provider_error",
-                        message=f"provider failed at step '{step.role}': "
-                        f"{result.error or 'unknown error'}",
-                    ),
-                )
-                if on_step:
-                    on_step(step_outcome)
-                self._write_run(wi, run_id, started_at, run_steps, outcome)
-                self._summarize(wi, "stop", run_steps)
-                return outcome
-
-            # A role can raise a semantic safety stop (scope change, secrets
-            # access, a dangerous command, production access) on any step —
-            # this takes priority over review-gate logic on the same output.
-            stop_signal = parse_stop_signal(result.output)
-            if stop_signal is not None:
-                self._stop(wi, outcome, stop_signal)
-                if on_step:
-                    on_step(step_outcome)
-                self._write_run(wi, run_id, started_at, run_steps, outcome)
-                self._summarize(wi, "stop", run_steps)
+            if self._handle_terminal_checks(
+                wi, state, step_outcome, run_steps, outcome, run_id, started_at, on_step, result,
+            ):
                 return outcome
 
             # Review gate: decide whether to advance or loop back to fix.
@@ -206,30 +147,65 @@ class Engine:
                 verdict = parse_review_verdict(result.output)
                 step_outcome.verdict = verdict
                 run_steps[-1].verdict = verdict
+                details = parse_review_details(result.output)
+                step_outcome.review = details
+                run_steps[-1].review = details
                 if verdict == "changes_requested":
-                    decision = stop_conditions.check_max_fix_iterations(
-                        state.fix_iterations, self.flow.max_fix_iterations
-                    )
-                    if decision.stop:
-                        state.open_issues.append(decision.stop_reason.message)
-                        self._stop(wi, outcome, decision.stop_reason)
-                        if on_step:
-                            on_step(step_outcome)
-                        self._write_run(wi, run_id, started_at, run_steps, outcome)
-                        self._summarize(wi, "stop", run_steps)
+                    if self._handle_gate_failure(
+                        wi, state, step, step_outcome, run_steps, outcome,
+                        run_id, started_at, on_step,
+                        steps=self.flow.steps,
+                        set_step_index=lambda i: setattr(state, "step_index", i),
+                    ):
                         return outcome
-                    self._loop_back(state, step, step_outcome)
-                    run_steps[-1].looped_back = True
-                    save_state(self.paths, state)
-                    if on_step:
-                        on_step(step_outcome)
-                    self._summarize(wi, "loop_back", run_steps)
+                    continue
+
+            # Verify gate: same shape as review, driven by VERIFY: instead —
+            # shares the same fix_iterations/max_fix_iterations budget. Runs
+            # once at the end of the flow (after every phase, for a phased flow).
+            elif step.gate == "verify":
+                verify_verdict = parse_verify_verdict(result.output)
+                step_outcome.verdict = verify_verdict
+                run_steps[-1].verdict = verify_verdict
+                verify_details = parse_verify_details(result.output)
+                step_outcome.verify = verify_details
+                run_steps[-1].verify = verify_details
+                if verify_verdict == "failed":
+                    target_role = step.on_changes
+                    target_in_top_level = (
+                        target_role is not None
+                        and self.flow.index_of_role(target_role) is not None
+                    )
+                    if (
+                        not target_in_top_level
+                        and self.flow.phase_flow
+                        and plan is not None
+                        and any(s.role == target_role for s in self.flow.phase_flow)
+                    ):
+                        # The fix target only exists inside phase_flow — redo
+                        # just the last phase instead of an invalid top-level jump.
+                        if self._redo_last_phase_after_verify_failure(
+                            wi, state, step_outcome, run_steps, outcome,
+                            run_id, started_at, on_step, plan, workitem_id,
+                            on_step_start, on_step_output,
+                        ):
+                            return outcome
+                        continue
+                    if self._handle_gate_failure(
+                        wi, state, step, step_outcome, run_steps, outcome,
+                        run_id, started_at, on_step,
+                        steps=self.flow.steps,
+                        set_step_index=lambda i: setattr(state, "step_index", i),
+                    ):
+                        return outcome
                     continue
 
             if step.role == "planner" and result.ok:
-                m = re.search(r"^BRANCH:\s*(\S+)", result.output, re.MULTILINE)
-                if m:
-                    state.feature_branch = m.group(1).strip()
+                plan = parse_planner_output(result.output)
+                step_outcome.plan = plan
+                run_steps[-1].plan = plan
+                if plan and plan.branch:
+                    state.feature_branch = plan.branch
 
             state.step_index += 1
             state.record(f"{step.role} completed via {result.provider}")
@@ -237,26 +213,345 @@ class Engine:
             if on_step:
                 on_step(step_outcome)
 
+            # Run after the planner's own bookkeeping/on_step call above, so
+            # live output shows the planner's line before any phase's —
+            # phase_flow doesn't touch state.step_index, so this can safely
+            # happen once the planner step itself is fully "done".
+            if step.role == "planner" and result.ok and self.flow.phase_flow:
+                if not self._run_phases(
+                    wi, state, plan, outputs_dir, run_id, started_at,
+                    run_steps, outcome, workitem_id,
+                    on_step, on_step_start, on_step_output,
+                ):
+                    return outcome
+
         self._finish(wi, outcome)
         self._write_run(wi, run_id, started_at, run_steps, outcome)
         self._summarize(wi, "finish", run_steps)
         return outcome
 
-    def _loop_back(self, state: WorkitemState, step: FlowStep, outcome: StepOutcome) -> None:
-        """Send the loop back to the step's ``on_changes`` role for a fix pass."""
-        target_role = step.on_changes
-        target_index = self.flow.index_of_role(target_role) if target_role else None
-        if target_index is None:
-            # Misconfigured gate: fall back to re-running from the start of the flow.
-            target_index = 0
+    def _execute_step(
+        self,
+        step: FlowStep,
+        wi: Workitem,
+        state: WorkitemState,
+        outputs_dir: Path,
+        seq: int,
+        workitem_id: str,
+        on_step_start: Callable[[str, str], None] | None,
+        on_step_output: Callable[[str], None] | None,
+        phase: PlannerPhase | None = None,
+        phase_index: int | None = None,
+    ) -> tuple[StepOutcome, StepRecord, ProviderResult]:
+        """Build context, call the provider, write artifacts, and record the
+        step. Shared by the top-level flow walk and the per-phase walk
+        (``_run_phases``) so there is exactly one place that does this."""
+        provider = self.provider_for(step.role)
+        prompt = build_context(
+            self.paths, wi, step.role,
+            context_config=self.context_config,
+            execution_cwd=self._execution_cwd,
+            current_phase=phase,
+        )
+        prompt_path = outputs_dir / f"{seq:02d}-{step.role}.prompt.md"
+        output_path = outputs_dir / f"{seq:02d}-{step.role}.output.md"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        if on_step_start:
+            on_step_start(step.role, provider.name)
+        t0 = time.monotonic()
+        result = provider.run(
+            ProviderRequest(
+                role=step.role,
+                prompt=prompt,
+                workitem_id=workitem_id,
+                cwd=self._execution_cwd,
+                on_output=on_step_output,
+            )
+        )
+        duration_sec = time.monotonic() - t0
+        output_path.write_text(result.output, encoding="utf-8")
+
+        phase_name = phase.name if phase is not None else None
+        step_outcome = StepOutcome(
+            index=seq,
+            role=step.role,
+            stage=step.stage,
+            provider=result.provider,
+            ok=result.ok,
+            prompt_path=prompt_path,
+            output_path=output_path,
+            error=result.error,
+            phase_index=phase_index,
+            phase_name=phase_name,
+        )
+        step_record = StepRecord(
+            index=seq,
+            role=step.role,
+            provider=result.provider,
+            ok=result.ok,
+            duration_sec=round(duration_sec, 2),
+            prompt_chars=len(prompt),
+            output_chars=len(result.output),
+            prompt_path=prompt_path.relative_to(wi.directory).as_posix(),
+            output_path=output_path.relative_to(wi.directory).as_posix(),
+            phase_index=phase_index,
+            phase_name=phase_name,
+        )
+
+        state.artifacts[step.role] = output_path.relative_to(wi.directory).as_posix()
+        state.stage = step.stage
+        state.iterations += 1
+        return step_outcome, step_record, result
+
+    def _handle_terminal_checks(
+        self,
+        wi: Workitem,
+        state: WorkitemState,
+        step_outcome: StepOutcome,
+        run_steps: list[StepRecord],
+        outcome: RunOutcome,
+        run_id: str,
+        started_at: str,
+        on_step: Callable[[StepOutcome], None] | None,
+        result: ProviderResult,
+    ) -> bool:
+        """Provider failure / semantic STOP: checks shared by the top-level
+        flow walk and the per-phase walk. Returns ``True`` if the run
+        stopped (caller should return ``outcome`` now), ``False`` to proceed."""
+        if not result.ok:
+            self._stop(
+                wi,
+                outcome,
+                StopReason(
+                    type="provider_error",
+                    message=f"provider failed at step '{step_outcome.role}': "
+                    f"{result.error or 'unknown error'}",
+                ),
+            )
+            if on_step:
+                on_step(step_outcome)
+            self._write_run(wi, run_id, started_at, run_steps, outcome)
+            self._summarize(wi, "stop", run_steps)
+            return True
+
+        # A role can raise a semantic safety stop (scope change, secrets
+        # access, a dangerous command, production access) on any step —
+        # this takes priority over review-gate logic on the same output.
+        stop_signal = parse_stop_signal(result.output)
+        if stop_signal is not None:
+            self._stop(wi, outcome, stop_signal)
+            if on_step:
+                on_step(step_outcome)
+            self._write_run(wi, run_id, started_at, run_steps, outcome)
+            self._summarize(wi, "stop", run_steps)
+            return True
+        return False
+
+    def _run_phases(
+        self,
+        wi: Workitem,
+        state: WorkitemState,
+        plan: PlannerPlan | None,
+        outputs_dir: Path,
+        run_id: str,
+        started_at: str,
+        run_steps: list[StepRecord],
+        outcome: RunOutcome,
+        workitem_id: str,
+        on_step: Callable[[StepOutcome], None] | None,
+        on_step_start: Callable[[str, str], None] | None,
+        on_step_output: Callable[[str], None] | None,
+        only_last: bool = False,
+    ) -> bool:
+        """Walk ``self.flow.phase_flow`` once per ``plan.phases``.
+
+        If the planner emitted no phases, falls back to running
+        ``phase_flow`` once against an implicit single phase rather than
+        silently doing nothing. ``only_last=True`` re-runs just the final
+        phase (used when the verifier's ``on_changes`` loops back into a
+        role that only exists in ``phase_flow``, not the flow's own
+        top-level ``steps``). Returns ``True`` once every phase requested
+        completes; ``False`` if the run stopped (already written).
+        """
+        phases = plan.phases if plan and plan.phases else [
+            PlannerPhase(name="(single phase)", goal="")
+        ]
+        state.total_phases = len(phases)
+        phase_flow = self.flow.phase_flow or []
+        phase_indices = [len(phases) - 1] if only_last else list(range(len(phases)))
+
+        for phase_index in phase_indices:
+            phase = phases[phase_index]
+            state.current_phase_index = phase_index
+            save_state(self.paths, state)
+
+            local_index = [0]
+            while local_index[0] < len(phase_flow):
+                step = phase_flow[local_index[0]]
+                seq = state.iterations
+                step_outcome, step_record, result = self._execute_step(
+                    step, wi, state, outputs_dir, seq, workitem_id,
+                    on_step_start, on_step_output,
+                    phase=phase, phase_index=phase_index,
+                )
+                outcome.steps.append(step_outcome)
+                run_steps.append(step_record)
+
+                if self._handle_terminal_checks(
+                    wi, state, step_outcome, run_steps, outcome,
+                    run_id, started_at, on_step, result,
+                ):
+                    return False
+
+                if step.gate == "review":
+                    verdict = parse_review_verdict(result.output)
+                    step_outcome.verdict = verdict
+                    run_steps[-1].verdict = verdict
+                    details = parse_review_details(result.output)
+                    step_outcome.review = details
+                    run_steps[-1].review = details
+                    if verdict == "changes_requested":
+                        if self._handle_gate_failure(
+                            wi, state, step, step_outcome, run_steps, outcome,
+                            run_id, started_at, on_step,
+                            steps=phase_flow,
+                            set_step_index=lambda i: local_index.__setitem__(0, i),
+                            phase_label=f" (phase {phase_index + 1}/{len(phases)}: '{phase.name}')",
+                        ):
+                            return False
+                        continue
+
+                state.record(
+                    f"{step.role} completed via {result.provider} "
+                    f"(phase {phase_index + 1}/{len(phases)}: '{phase.name}')"
+                )
+                save_state(self.paths, state)
+                if on_step:
+                    on_step(step_outcome)
+                local_index[0] += 1
+
+        return True
+
+    def _redo_last_phase_after_verify_failure(
+        self,
+        wi: Workitem,
+        state: WorkitemState,
+        step_outcome: StepOutcome,
+        run_steps: list[StepRecord],
+        outcome: RunOutcome,
+        run_id: str,
+        started_at: str,
+        on_step: Callable[[StepOutcome], None] | None,
+        plan: PlannerPlan,
+        workitem_id: str,
+        on_step_start: Callable[[str, str], None] | None,
+        on_step_output: Callable[[str], None] | None,
+    ) -> bool:
+        """The verifier failed and its ``on_changes`` role lives in
+        ``phase_flow``, not the flow's top-level ``steps`` — redo just the
+        last phase (implementer/reviewer) instead of an invalid jump.
+        Returns ``True`` if the run stopped (caller should return
+        ``outcome``), ``False`` if the redo succeeded (caller should
+        ``continue`` — ``state.step_index`` still points at the verifier, so
+        the next iteration retries it)."""
+        decision: StopDecision = stop_conditions.check_max_fix_iterations(
+            state.fix_iterations, self.flow.max_fix_iterations
+        )
+        if decision.stop:
+            state.open_issues.append(decision.stop_reason.message)
+            self._stop(wi, outcome, decision.stop_reason)
+            if on_step:
+                on_step(step_outcome)
+            self._write_run(wi, run_id, started_at, run_steps, outcome)
+            self._summarize(wi, "stop", run_steps)
+            return True
+
         state.fix_iterations += 1
-        state.step_index = target_index
         state.stage = "fixing"
-        outcome.looped_back = True
+        step_outcome.looped_back = True
+        run_steps[-1].looped_back = True
         state.record(
-            f"reviewer requested changes; looping back to '{target_role or 'start'}' "
+            f"verifier requested changes; redoing the last phase "
             f"(fix {state.fix_iterations}/{self.flow.max_fix_iterations})"
         )
+        save_state(self.paths, state)
+        if on_step:
+            on_step(step_outcome)
+        self._summarize(wi, "loop_back", run_steps)
+
+        redo_ok = self._run_phases(
+            wi, state, plan, wi.directory / "outputs", run_id, started_at,
+            run_steps, outcome, workitem_id,
+            on_step, on_step_start, on_step_output,
+            only_last=True,
+        )
+        return not redo_ok
+
+    def _handle_gate_failure(
+        self,
+        wi: Workitem,
+        state: WorkitemState,
+        step: FlowStep,
+        step_outcome: StepOutcome,
+        run_steps: list[StepRecord],
+        outcome: RunOutcome,
+        run_id: str,
+        started_at: str,
+        on_step: Callable[[StepOutcome], None] | None,
+        *,
+        steps: list[FlowStep],
+        set_step_index: Callable[[int], None],
+        phase_label: str = "",
+    ) -> bool:
+        """Check the fix-iteration budget and either loop back or stop.
+
+        Shared by the review gate (``changes_requested``) and the verify gate
+        (``failed``) — both send the fix loop back to the step's
+        ``on_changes`` role and share one ``fix_iterations``/
+        ``max_fix_iterations`` budget rather than a separate counter per gate.
+        ``steps``/``set_step_index`` let this be reused for both the
+        top-level flow (position = ``state.step_index``) and a phase's
+        ``phase_flow`` (position = a local index) without duplicating the
+        budget-check/loop-back/stop logic a third time.
+        Returns ``True`` if the run stopped (caller should return ``outcome``),
+        ``False`` if it looped back (caller should ``continue``).
+        """
+        decision: StopDecision = stop_conditions.check_max_fix_iterations(
+            state.fix_iterations, self.flow.max_fix_iterations
+        )
+        if decision.stop:
+            state.open_issues.append(decision.stop_reason.message)
+            self._stop(wi, outcome, decision.stop_reason)
+            if on_step:
+                on_step(step_outcome)
+            self._write_run(wi, run_id, started_at, run_steps, outcome)
+            self._summarize(wi, "stop", run_steps)
+            return True
+
+        target_role = step.on_changes
+        target_index = None
+        if target_role:
+            target_index = next(
+                (i for i, s in enumerate(steps) if s.role == target_role), None
+            )
+        if target_index is None:
+            # Misconfigured gate: fall back to re-running from the start.
+            target_index = 0
+        set_step_index(target_index)
+        state.fix_iterations += 1
+        state.stage = "fixing"
+        step_outcome.looped_back = True
+        gate_source = "reviewer" if step.gate == "review" else "verifier"
+        state.record(
+            f"{gate_source} requested changes{phase_label}; looping back to "
+            f"'{target_role or 'start'}' (fix {state.fix_iterations}/{self.flow.max_fix_iterations})"
+        )
+        run_steps[-1].looped_back = True
+        save_state(self.paths, state)
+        if on_step:
+            on_step(step_outcome)
+        self._summarize(wi, "loop_back", run_steps)
+        return False
 
     def _stop(
         self, wi: Workitem, outcome: RunOutcome, stop_reason: StopReason
@@ -371,8 +666,9 @@ def _build_final_report(wi: Workitem, flow: Flow, outcome: RunOutcome) -> str:
             suffix = f" → _{step.verdict}_"
             if step.looped_back:
                 suffix += " (looped back to fix)"
+        phase_prefix = f"[phase: {step.phase_name}] " if step.phase_name else ""
         lines.append(
-            f"- {mark} **{step.role}** ({step.stage}) via {step.provider} — `{rel}`{suffix}"
+            f"- {mark} {phase_prefix}**{step.role}** ({step.stage}) via {step.provider} — `{rel}`{suffix}"
         )
     if wi.state.fix_iterations:
         lines += ["", f"_Fix iterations: {wi.state.fix_iterations}._"]

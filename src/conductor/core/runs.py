@@ -16,6 +16,9 @@ import yaml
 from pydantic import BaseModel, Field
 
 from ..workitems.models import StopReason
+from .planner_output import PlannerPlan
+from .review import ReviewDetails
+from .verify import VerifyDetails
 
 _RUN_DIRNAME_RE = re.compile(r"^run-(\d+)$")
 
@@ -36,6 +39,14 @@ class StepRecord(BaseModel):
     #: set for workspace runs (one project's implementer/reviewer step);
     #: None for single-repo Engine steps and for the workspace planner step.
     project_name: str | None = None
+    #: set for a phase_flow step (Flow.phase_flow); None for top-level steps.
+    phase_index: int | None = None
+    phase_name: str | None = None
+    #: structured output, populated only on the step where it's relevant
+    #: (planner/reviewer/verifier respectively); None elsewhere.
+    plan: PlannerPlan | None = None
+    review: ReviewDetails | None = None
+    verify: VerifyDetails | None = None
 
 
 class RunRecord(BaseModel):
