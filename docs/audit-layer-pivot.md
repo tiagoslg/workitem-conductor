@@ -1,0 +1,168 @@
+# Pivot: de orquestrador de coding roles para camada de registo/auditoria de planos
+
+**Data:** 2026-07-17
+**Branch:** `docs/audit-layer-pivot` (a partir de `main`, pós-merge de `feat/centralize-workitems`)
+**Estado:** proposta para validação externa — nada deste documento foi implementado ainda.
+
+Este documento existe para ser validado fora desta conversa antes de qualquer código ser escrito. Regista o raciocínio completo, não só a conclusão, para que uma leitura externa consiga discordar de um passo específico sem ter de reconstruir todo o histórico.
+
+---
+
+## 1. Como chegámos aqui
+
+### 1.1 O problema original (resolvido, não pelo `workitem-conductor`)
+
+O projeto nasceu para resolver uma dor operacional concreta: múltiplas assinaturas de AI (Codex, Claude, Kimi, etc.), cada uma com o seu CLI, e a fricção de copiar prompt/output de um lado para o outro à mão. A ideia original era um orquestrador que chamasse o CLI certo por papel (`planner`/`implementer`/`reviewer`/...).
+
+**Esse problema já não existe.** O OpenCode (`~/.config/opencode/`) passou a resolver o roteamento multi-modelo nativamente — providers configuráveis, agentes com modelo/permissões próprios por papel (`implementer.md`, `reviewer.md`, `tester.md`, `committer.md`, orquestrados por `workitem-conductor.md`), tudo já em uso diário real. Confirmado explicitamente: "já morreu, uso o opencode pra tudo hoje em dia."
+
+### 1.2 O que ficou depois de a dor original desaparecer
+
+Duas motivações sobreviveram à morte do problema original, ambas descobertas *durante* esta conversa, não desenhadas de propósito desde o início:
+
+1. **Auditabilidade** — inspirado no AI Act da UE (com a ressalva honesta de que um assistente de coding provavelmente não é "high-risk" pela letra da lei, mas o princípio de decisão rastreável/replayável aplica-se como boa prática, e generaliza a outros domínios: foi dado como exemplo um agente interno de processamento de sinistros de seguros).
+2. **"Aprender a orquestrar"** (inspiração Sakana/Trinity, de um meetup anterior) — hoje usa-se GPT-5.5 como orquestrador no OpenCode por ser a aposta segura, sem dados que confirmem se compensa o custo face a um modelo mais barato. Isto **depende** do ponto 1: sem registo estruturado de que modelo orquestrou, quanto custou, quantos loop-backs foram precisos, não há dados para decidir.
+
+### 1.3 A descoberta que resolveu "como capturar"
+
+Investigação a `~/.local/share/opencode/opencode.db` (SQLite, 3.6GB) confirmou que o OpenCode **já regista tudo o que estas duas motivações precisam**, nativamente, sem qualquer integração nova:
+
+- Tabela `session`: uma linha por invocação de agente — `agent` (nome do papel, ex. `"implementer"`, `"reviewer"`, `"workitem-conductor"`), `model` (id+provider), `cost`, `tokens_input/output/reasoning/cache`, `parent_id` (liga subagentes à sessão que os chamou), `directory`, timestamps.
+- Tabelas `message`/`part`: transcript completo — texto final (incluindo veredictos como `APPROVED`/`CHANGES_REQUIRED`), chamadas de bash com comando+output, reasoning traces.
+- Confirmado em dados reais: uma sessão-mãe `agent: workitem-conductor`, `model: gpt-5.5`, com filhas `implementer` (por vezes `claude-sonnet-5`, por vezes `qwen3-coder-plus`) e `reviewer` (`gpt-5.5`).
+
+Conclusão: **não é preciso construir nenhuma camada de captura.** Construir um wrapper que invoca o `opencode` como subprocesso e apanha stdout/exit-code/diff (a proposta inicial de outra análise, feita sem conhecer este ficheiro) seria estritamente pior — perderia a atribuição por papel, custo/tokens, e reasoning traces que o `opencode.db` já dá de graça. E reintroduziria fricção: obrigar a invocar tudo através do `conductor run --executor opencode ...` é o mesmo tipo de fricção que matou a motivação original (1.1).
+
+### 1.4 A peça que faltava: identidade estável do "workitem"
+
+O `opencode.db` não tem noção de "isto é a mesma unidade de trabalho de negócio ao longo de vários dias/sessões" — sessões são só threads de conversa. Essa identidade já existe informalmente na prática do utilizador: ficheiros `execution_plans/*.md` por repositório (ex. `.ai/execution_plans/2026-07-15_inline-step-delegation-and-field-clear-affordances.md`), escritos numa conversa com o Claude, depois entregues ao comando `/implement-plan` do OpenCode (que injeta literalmente `"Read the implementation plan from @$ARGUMENTS"` no prompt).
+
+**Verificado em dados reais**: o caminho do ficheiro do plano aparece verbatim na primeira mensagem da sessão-mãe no `opencode.db` (`LIKE '%execution_plans%'` encontrou-o diretamente). A correlação plano↔sessões custa uma query, sem integração nova.
+
+### 1.5 O caso real que expôs os limites do formato ad-hoc
+
+Uma sprint real com **20 execution plans** espalhados por 5+ repositórios (TPA, JC, hub, care BE, care FE, selfcare), com dependências cruzadas ("depende do #17"), uma tarefa embutida sem ficheiro próprio dentro de outro plano ("Task 0"), e uma equipa externa a executar um plano sem acesso cross-repo (exigindo que esse plano fosse autossuficiente) — tudo isto tracked à mão numa tabela markdown mantida manualmente. Isto é dor real, presente, não hipotética — mais urgente do que a correlação de auditoria em si.
+
+---
+
+## 2. Decisão: control plane, não execution plane
+
+`OpenCode = execution plane` (planeia, edita, revê, testa, usa ferramentas).
+`workitem-conductor = control plane + audit plane` (regista intenção, dependências, evidência, decisão humana).
+
+O critério de sobrevivência de qualquer peça do projeto: **só existe se responder a uma pergunta que os logs soltos do OpenCode, sozinhos, não respondem bem.**
+
+```text
+Qual era o objetivo aprovado?
+Que planos dependem de quê, e nessa ordem?
+Este plano está pronto para ser entregue a outra equipa sem contexto extra?
+Que sessões/custo/modelo executaram este plano?
+Que decisão humana aceitou ou reabriu isto?
+```
+
+### 2.1 A simplificação final: nem a conversa de criação do plano fica no conductor
+
+Ponto de viragem desta conversa: um comando `/create-plan` no OpenCode (irmão do `/implement-plan` já existente) pode conduzir a conversa "transformar frase genérica num plano" — exatamente onde já se vive o dia todo — em vez de o `workitem-conductor` manter o seu próprio ciclo `define`/`refine`/`approve` a chamar modelos.
+
+Isto significa que o `workitem-conductor` final **não faz nenhuma chamada a um LLM**. Zero. É scanner de ficheiros + leitor de SQLite + validador + gerador de relatórios.
+
+---
+
+## 3. O que morre
+
+Tudo o que competia com o OpenCode em orquestração/execução, e tudo o que existia só para servir essa orquestração:
+
+- `core/engine.py` (`Engine`), `core/workspace_engine.py` (`WorkspaceEngine`)
+- `flows/models.py` (`Flow`, `FlowStep`, `phase_flow`)
+- `strategies/` (`Strategy`, seletor)
+- `core/review.py`, `core/verify.py`, `core/planner_output.py` — parsing de output estruturado de roles que deixam de existir
+- `core/stop_conditions.py` — deteção de `STOP:` marker num output que o conductor deixa de gerar
+- `core/runs.py` (`RunRecord`/`StepRecord`/`MetricsRecord`) — modelo de auditoria desenhado à volta de o `Engine` executar passos; substituído pela leitura direta do `opencode.db`
+- `core/context.py` — construção de prompt para roles que deixam de ser chamados pelo conductor
+- `core/summarize.py` + `memory.yml`/`MemoryRecord` — compactação de uma conversa longa própria que deixa de existir (a "conversa" passa a ser uma sessão OpenCode, já registada no `opencode.db`)
+- `core/worktree.py` — criação de worktrees; git continua a ser gerido pelo utilizador/OpenCode diretamente
+- `workitems/manager.py`'s `define`/`refine`/`approve`/`reopen`/`accept` e todo o ciclo de vida de `WorkitemState` — a conversa de criação do plano muda de casa para o `/create-plan` do OpenCode
+- `scaffold.py` — scaffolding de flows/roles/strategies
+- `providers/` (`cli_one_shot`/`api`/`ollama`/`dry_run`) — o conductor deixa de chamar qualquer provider
+
+### O que sobrevive/é reaproveitado
+
+- Padrão de modelos pydantic com `to_yaml`/`from_yaml` (usado noutro contexto: o modelo do frontmatter do plano)
+- `core/yaml_utils.py` — parsing de blocos YAML/frontmatter, diretamente reaproveitável
+- Conceito de registo de projetos/workspaces (`~/.config/conductor/workspaces.yml`) — passa a ser "que repositórios têm `.ai/execution_plans/` para varrer", não "que repositórios fazem parte de um workitem cross-projeto"
+- `home.py` (`config_home`/`data_home`/`cache_home`) — continua a fazer sentido para uma cache local do índice de planos (ver §6)
+
+---
+
+## 4. Desenho novo
+
+### 4.1 No OpenCode: `/create-plan`
+
+Novo command (`~/.config/opencode/commands/create-plan.md`), análogo a `implement-plan.md`. Conduz a conversa "frase genérica → plano estruturado" com o utilizador. O prompt do agente:
+
+- Sabe a estrutura obrigatória do corpo (Background, Goal, Out of scope, Tasks, Acceptance criteria, Risks) — a mesma que já se usa com sucesso hoje.
+- Sabe o frontmatter obrigatório (§5).
+- Antes de finalizar, corre `conductor plans list --sprint <sprint>` (ou equivalente) como comando bash — permitido no `permission.bash` do agente, mesmo padrão que já existe para `git status*: allow` — para saber que outros planos já existem e preencher `depends_on`/`related` corretamente, incluindo planos de outros repositórios.
+- Grava o ficheiro em `.ai/execution_plans/<data>_<slug>.md` no repositório certo.
+
+O `workitem-conductor` não participa desta conversa — só é consultado, passivamente, via linha de comando.
+
+### 4.2 No `workitem-conductor`: `conductor plans`
+
+Substitui inteiramente o `Engine`/workitem lifecycle atual. Sub-comandos propostos:
+
+- `conductor plans list [--sprint <nome>] [--repo <nome>]` — varre `.ai/execution_plans/**/*.md` nos repositórios registados, faz parse do frontmatter, mostra tabela (repo, ficheiro, estado, commit, depende-de). Substitui a tabela mantida à mão.
+- `conductor plans lint [<id>]` — valida: dependências referenciadas existem, sem ciclos, `executable: false` só em índices, e (regra de autossuficiência) todo `depends_on`/`related` que aponte para um plano fora do conjunto de repos legível pela equipa-alvo tem de ter um resumo inline no corpo.
+- `conductor plans graph [--sprint <nome>]` — grafo de dependências; calcula "pronto a executar agora" (todas as dependências em `status: done`).
+- `conductor plans mark <id> done --commit <sha>` — atualiza o frontmatter do ficheiro (não uma base de dados separada — o ficheiro continua a ser a fonte de verdade).
+- `conductor plans sync [<id>]` — corre a query `LIKE` contra `opencode.db` para correlacionar sessões (custo, modelo, papel) com o plano, por `id`.
+- `conductor plans table [--sprint <nome>]` — regenera a tabela markdown para colar num PR/partilhar com outra equipa.
+- (mais tarde) `conductor export-audit --sprint <nome>` — pacote de auditoria: planos + sessões correlacionadas + diffs + estado das acceptance criteria.
+
+---
+
+## 5. Schema do frontmatter (proposta inicial, para validação)
+
+```yaml
+---
+id: claim-values-05-bugfixes        # slug estável, independente da data no filename
+sprint: claim-values                 # agrupa planos da mesma iniciativa; opcional
+repo: habit-tpaclaims-pyservice-layer
+status: planned | in_progress | blocked | done
+executable: true                     # false para ficheiros de índice (ex. "-00-overview.md")
+commit: null                         # preenchido em `plans mark done --commit`
+depends_on: []                       # lista de `id`s
+related: []                          # lista de `id`s (não bloqueante, só contexto)
+blocked_until: null                  # texto livre para gates não-plano (ex. "TPA em staging") — não validado automaticamente
+owner_team: null                     # opcional; relevante quando outra equipa executa
+---
+```
+
+O corpo do markdown **não é estruturado** — fica em prosa livre, exatamente como já se escreve hoje. Só o índice (frontmatter) é máquina-legível. Isto evita repetir o erro do `PlannerPhase` do código antigo (forçar texto livre a YAML rígido).
+
+---
+
+## 6. Fluxo de trabalho ponta a ponta
+
+1. **Início** — problema/card genérico. No OpenCode: `/create-plan "melhorar o cálculo dos valores da claim" --repo habit-tpaclaims-pyservice-layer --sprint claim-values` (ou equivalente). Conversa até convergir no ficheiro final, frontmatter incluído.
+2. **Registo** — nada a fazer explicitamente; `conductor plans list` varre o ficheiro assim que existe.
+3. **Antes de executar** — `conductor plans ready --sprint claim-values` mostra o que já pode arrancar (dependências satisfeitas). `conductor plans lint` valida autossuficiência antes de entregar a outra equipa.
+4. **Execução** — `/implement-plan` no OpenCode, sem alterações, sem o conductor no meio.
+5. **Depois de executar** — `conductor plans mark <id> done --commit <sha>`.
+6. **Reporting/auditoria** — `conductor plans table`/`conductor plans sync`/`conductor export-audit`.
+
+---
+
+## 7. Riscos e questões em aberto (para validação externa)
+
+1. **`blocked_until` não-plano** (ex. "só arranca com TPA em staging") fica como texto livre, não validado. Aceitável, ou vale a pena um segundo tipo de gate (ex. `depends_on_deploy: <ambiente>`) validável por outro meio (webhook de CI, etc.)? Proposta atual: não vale a pena agora, é complexidade prematura.
+2. **`opencode.db` é um ficheiro local único, sem retenção conhecida.** Se o OpenCode alguma vez fizer vacuum/prune, perde-se histórico. Precisa de um export periódico independente desta pivot — vale a pena tratar como item separado, não bloqueante.
+3. **`id` como chave** — hoje os planos já usam nomes de ficheiro datados como identidade natural (`2026-07-15_...`). O `id` do frontmatter pode ser derivado do nome do ficheiro por omissão (menos fricção ao escrever) com override manual só quando necessário.
+4. **Migração dos 20 planos já existentes na sprint `claim-values`** não têm frontmatter — precisam de ser retro-adaptados manualmente ou por um script de migração one-off (não vale a pena automatizar isto de forma sofisticada, é um custo único).
+5. **O `/create-plan` no OpenCode precisa de permissão de leitura cross-repo** para consultar `conductor plans list` de outros repositórios sensatamente — confirmar que o padrão de permissões atual (`bash: {"*": ask}`) não vai gerar demasiados prompts de confirmação na prática.
+
+---
+
+## 8. Não incluído neste documento
+
+Desenho detalhado dos modelos pydantic e da implementação do `conductor plans` — fica para uma sessão de planeamento própria, depois desta validação externa.
