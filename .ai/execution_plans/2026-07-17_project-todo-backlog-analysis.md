@@ -3,7 +3,7 @@ schema_version: 1
 id: project-todo-backlog-analysis
 sprint: null
 primary_repo: workitem-conductor
-status: draft
+status: ready
 executable: true
 commits: []
 depends_on: []
@@ -14,7 +14,6 @@ external_handoff: false
 created_at: 2026-07-17
 completed_at: null
 ---
-
 # Project TODO and Backlog Analysis
 **Date:** 2026-07-17
 **Scope:** Analyze the `workitem-conductor` repository, with focus on `README.md`, `docs/backlog.md`, `docs/backlog-adjusted.md`, `docs/local-agent-brief.md`, `src/`, `tests/`, and existing TODO/backlog signals. Produce an improved, actionable TODO/backlog document for this repository.

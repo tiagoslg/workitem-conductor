@@ -37,12 +37,7 @@ def lint_plans(plans: list[Plan]) -> list[LintIssue]:
             if dep_id not in by_id:
                 issues.append(LintIssue(plan_id=p.id, message=f"depends_on/related references unknown id '{dep_id}'"))
 
-        if not fm.executable and fm.status not in ("draft", "ready", "done"):
-            # index/overview plans aren't meant to carry execution state at all,
-            # but don't police this too hard — just flag the unusual combination.
-            pass
-
-        if fm.status == "done" and not fm.commits:
+        if fm.executable and fm.status == "done" and not fm.commits:
             issues.append(LintIssue(plan_id=p.id, message="status is 'done' but commits is empty"))
 
         if fm.executable and fm.status == "done":

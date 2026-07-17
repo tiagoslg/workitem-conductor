@@ -146,6 +146,12 @@ def test_lint_flags_unknown_dependency():
     assert any("unknown id 'ghost'" in i.message for i in issues)
 
 
+def test_lint_does_not_require_commits_for_non_executable_done_plan():
+    plans = [_plan("overview", status="done", executable=False, commits=[])]
+    issues = lint_plans(plans)
+    assert issues == []
+
+
 def test_lint_flags_cycle():
     plans = [_plan("a", depends_on=["b"]), _plan("b", depends_on=["a"])]
     issues = lint_plans(plans)
