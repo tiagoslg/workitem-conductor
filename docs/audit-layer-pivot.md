@@ -90,6 +90,8 @@ Isto significa que o `workitem-conductor` final **não faz nenhuma chamada a um 
 
 ## 3. O que morre
 
+**Decisão explícita: apagar, não congelar.** Uma revisão externa (GPT) sugeriu manter este código escondido atrás de um `conductor legacy execute` por 2-3 semanas antes de remover, para evitar um "refactor destrutivo". Essa cautela faz sentido quando há equipa/produção a depender do código — não é o caso aqui: utilizador único, nunca chegou a usar M5-M9 em trabalho real, e o git preserva tudo de qualquer forma (nada se perde — está a um `git log`/checkout de distância). Manter uma via `legacy` viva é só superfície morta (imports, testes a passar por código que ninguém usa) sem benefício real. Corte total, já, nesta pivot.
+
 Tudo o que competia com o OpenCode em orquestração/execução, e tudo o que existia só para servir essa orquestração:
 
 - `core/engine.py` (`Engine`), `core/workspace_engine.py` (`WorkspaceEngine`)
@@ -162,11 +164,14 @@ Proposta: capturar esta brief num ficheiro versionado (ex. `habit-tpaclaims-pyse
 Substitui inteiramente o `Engine`/workitem lifecycle atual. Sub-comandos propostos:
 
 - `conductor plans list [--sprint <nome>] [--repo <nome>]` — varre `.ai/execution_plans/**/*.md` nos repositórios registados, faz parse do frontmatter, mostra tabela (repo, ficheiro, estado, commit, depende-de). Substitui a tabela mantida à mão.
-- `conductor plans lint [<id>]` — valida: dependências referenciadas existem, sem ciclos, `executable: false` só em índices, e (regra de autossuficiência) todo `depends_on`/`related` que aponte para um plano fora do conjunto de repos legível pela equipa-alvo tem de ter um resumo inline no corpo.
+- `conductor plans lint [<id>]` — o comando mais importante do conjunto; sem ele os planos ficam soltos outra vez. Valida: `id` único (globalmente ou por sprint), `status` é um dos valores válidos, `depends_on`/`related` referenciam `id`s que existem, sem ciclos, `executable: false` nunca entra na lista de "pronto a executar", um plano `status: done` tem `commits` não-vazio, um plano não fica `done` se alguma dependência não estiver `done` (sem override explícito), e — regra de autossuficiência — todo plano com `external_handoff: true` tem de ter um resumo inline de cada `depends_on`/`related` no corpo, não só a referência.
 - `conductor plans graph [--sprint <nome>]` — grafo de dependências; calcula "pronto a executar agora" (todas as dependências em `status: done`).
-- `conductor plans mark <id> done --commit <sha>` — atualiza o frontmatter do ficheiro (não uma base de dados separada — o ficheiro continua a ser a fonte de verdade).
-- `conductor plans sync [<id>]` — corre a query `LIKE` contra `opencode.db` para correlacionar sessões (custo, modelo, papel) com o plano, por `id`.
+- `conductor plans mark <id> ready` — transição `draft` → `ready` (substitui o antigo `approve`, como campo de estado, não como comando com lógica própria).
+- `conductor plans mark <id> done --commit <sha>` — acrescenta a `commits` (lista, não valor único — um plano pode gerar mais do que um commit, sobretudo cross-repo ou com fix posterior) e atualiza o frontmatter do ficheiro (não uma base de dados separada — o ficheiro continua a ser a fonte de verdade). `completed_at` é preenchido automaticamente por este comando, não escrito à mão.
+- `conductor plans sync [<id>]` — descobre + normaliza + guarda snapshot, não é só uma query ao vivo. Corre a correlação contra `opencode.db` (ver nota sobre `PLAN_ID:` abaixo) e grava um snapshot normalizado em `~/.local/share/conductor/plans/<id>/opencode-sessions.json` — nunca dentro do repo do plano, para não poluir o histórico git desse repo com dados derivados de auditoria. `conductor plans list --with-execution` lê este snapshot, não o `opencode.db` diretamente, o que também protege contra o `opencode.db` mudar de schema/local/retenção entre o momento do `sync` e uma leitura posterior.
 - `conductor plans table [--sprint <nome>]` — regenera a tabela markdown para colar num PR/partilhar com outra equipa.
+
+**Correlação robusta, não só por path.** Confiar em `LIKE '%execution_plans%'` sobre o path do ficheiro é frágil — o ficheiro pode ser renomeado, o path pode ser relativo numa sessão e absoluto noutra, duas sessões podem referenciar o mesmo plano, uma sessão pode implementar só parte de um plano. Correção simples e de custo zero: o command `implement-plan.md` (já existente) passa a injetar sempre uma linha `PLAN_ID: <id>` (lido do frontmatter) no prompt, além do path — `conductor plans sync` procura primeiro por essa marca exata, com o path como fallback para planos antigos que ainda não tinham `id` na conversa que os executou.
 - (mais tarde) `conductor export-audit --sprint <nome>` — pacote de auditoria: planos + sessões correlacionadas + diffs + estado das acceptance criteria.
 
 ---
@@ -175,20 +180,27 @@ Substitui inteiramente o `Engine`/workitem lifecycle atual. Sub-comandos propost
 
 ```yaml
 ---
-id: claim-values-05-bugfixes        # slug estável, independente da data no filename
-sprint: claim-values                 # agrupa planos da mesma iniciativa; opcional
-repo: habit-tpaclaims-pyservice-layer
-status: planned | in_progress | blocked | done
-executable: true                     # false para ficheiros de índice (ex. "-00-overview.md")
-commit: null                         # preenchido em `plans mark done --commit`
-depends_on: []                       # lista de `id`s
-related: []                          # lista de `id`s (não bloqueante, só contexto)
-blocked_until: null                  # texto livre para gates não-plano (ex. "TPA em staging") — não validado automaticamente
-owner_team: null                     # opcional; relevante quando outra equipa executa
+schema_version: 1                    # evolução do formato sem dor — nunca sem isto
+id: claim-values-05-bugfixes         # slug estável, independente da data no filename
+sprint: claim-values                  # agrupa planos da mesma iniciativa; opcional
+primary_repo: habit-tpaclaims-pyservice-layer
+status: draft | ready | in_progress | blocked | done | canceled
+# draft = ainda a ser desenhado; ready = aprovado, pronto a executar (substitui o antigo "approve")
+executable: true                      # false para ficheiros de índice (ex. "-00-overview.md")
+commits: []                           # lista de shas — um plano pode gerar mais do que um commit
+depends_on: []                        # lista de `id`s
+related: []                           # lista de `id`s (não bloqueante, só contexto)
+blocked_until: null                   # texto livre para gates não-plano (ex. "TPA em staging") — não validado automaticamente
+owner_team: null                      # opcional; relevante quando outra equipa executa
+external_handoff: false               # true obriga o `plans lint` a exigir resumo inline de cada depends_on/related no corpo
+created_at: null                      # preenchido automaticamente, nunca escrito à mão
+completed_at: null                    # idem, por `plans mark done`
 ---
 ```
 
 O corpo do markdown **não é estruturado** — fica em prosa livre, exatamente como já se escreve hoje. Só o índice (frontmatter) é máquina-legível. Isto evita repetir o erro do `PlannerPhase` do código antigo (forçar texto livre a YAML rígido).
+
+Campo em aberto, ainda não decidido: `repos_affected: [{repo, role}]` (papel por repositório, herdado do schema do V4/V5 — §1.6/§7). Fica preparado no schema mas não obrigatório nesta versão.
 
 ---
 
@@ -206,7 +218,7 @@ O corpo do markdown **não é estruturado** — fica em prosa livre, exatamente 
 ## 7. Riscos e questões em aberto (para validação externa)
 
 1. **`blocked_until` não-plano** (ex. "só arranca com TPA em staging") fica como texto livre, não validado. Aceitável, ou vale a pena um segundo tipo de gate (ex. `depends_on_deploy: <ambiente>`) validável por outro meio (webhook de CI, etc.)? Proposta atual: não vale a pena agora, é complexidade prematura.
-2. **`opencode.db` é um ficheiro local único, sem retenção conhecida.** Se o OpenCode alguma vez fizer vacuum/prune, perde-se histórico. Precisa de um export periódico independente desta pivot — vale a pena tratar como item separado, não bloqueante.
+2. **Resolvido**: `opencode.db` é um ficheiro local único, sem retenção conhecida — se o OpenCode alguma vez fizer vacuum/prune, perde-se histórico. `conductor plans sync` (§4.3) já não é só uma query ao vivo — descobre, normaliza e grava snapshot próprio em `~/.local/share/conductor/plans/<id>/`, para o `workitem-conductor` preservar evidência independente do `opencode.db` continuar íntegro.
 3. **`id` como chave** — hoje os planos já usam nomes de ficheiro datados como identidade natural (`2026-07-15_...`). O `id` do frontmatter pode ser derivado do nome do ficheiro por omissão (menos fricção ao escrever) com override manual só quando necessário.
 4. **Migração dos 20 planos já existentes na sprint `claim-values`** não têm frontmatter — precisam de ser retro-adaptados manualmente ou por um script de migração one-off (não vale a pena automatizar isto de forma sofisticada, é um custo único).
 5. **Resolvido**: o `/create-plan` chama um agente `plan-writer` dedicado (§4.1), com escrita cross-repo via `bash: ask` (nunca `edit: allow`) — o `workitem-conductor` e os seus subagentes de implementação ficam inalterados, sem qualquer aumento de raio de ação. Falta só confirmar na prática se o padrão `bash: ask` gera confirmações a mais quando uma sessão escreve vários planos de seguida — se sim, considerar `"cat > */.ai/execution_plans/*": allow` como exceção pontual, mantendo tudo o resto pedido.
@@ -214,6 +226,18 @@ O corpo do markdown **não é estruturado** — fica em prosa livre, exatamente 
 
 ---
 
-## 8. Não incluído neste documento
+## 8. Sequência de implementação (marcos, não calendário)
+
+Ordem por onde a dor é maior primeiro — não faz sentido construir `export-audit`/grafo/integração CI antes de a tabela manual estar resolvida:
+
+1. **Registo** — `PlanFrontmatter` (pydantic), scanner de `.ai/execution_plans/**/*.md`, `plans list`, `plans lint`, `plans mark ready`/`mark done`, `plans table`. Sem `opencode.db` ainda. Já substitui a tabela mantida à mão — é o suficiente para ser útil sozinho.
+2. **Correlação** — `PLAN_ID:` no `implement-plan.md`, `plans sync` (descobre + normaliza + snapshot em `data_home()`), `plans list --with-execution` (custo/modelo/sessões).
+3. **Auditoria** — `export-audit --plan <id>`/`--sprint <nome>` (planos + sessões correlacionadas + commits + grafo de dependências).
+
+`plans graph` pode nascer em qualquer um destes passos, conforme a necessidade concreta de visualizar dependências aparecer primeiro.
+
+---
+
+## 9. Não incluído neste documento
 
 Desenho detalhado dos modelos pydantic e da implementação do `conductor plans` — fica para uma sessão de planeamento própria, depois desta validação externa.
