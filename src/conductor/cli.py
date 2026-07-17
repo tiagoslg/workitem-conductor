@@ -8,7 +8,6 @@ the direction is visible without pretending to do work.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import threading
@@ -17,6 +16,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape as _escape_markup
 from rich.status import Status as _RichStatus
 from rich.table import Table
 
@@ -33,6 +33,8 @@ from .config.models import ProviderConfig, RepoConfig, RoleBinding
 from .core.context import build_cross_project_section
 from .core.engine import Engine, GoalNotApproved, StepOutcome
 from .core.refine import Refiner
+from .core.runs import list_run_ids, load_metrics, load_run
+from .core.summarize import summarize
 from .core.workspace_engine import ProjectStepOutcome, WorkspaceEngine
 from .core.worktree import (
     branch_name as worktree_branch,
@@ -40,18 +42,22 @@ from .core.worktree import (
     create_worktree,
     merge_worktree,
     remove_worktree,
+    working_tree_diff,
     worktree_path,
 )
 from .flows.loader import FlowNotFound, load_flow
 from .paths import AI_DIRNAME, AiPaths, AiRootNotFound, WorkspacePaths, require_ai_paths
 from .providers.registry import ProviderConfigError, build_provider, build_provider_for
 from .scaffold import scaffold_ai, scaffold_workspace
+from .strategies.loader import StrategyNotFound, load_strategy, strategy_content_hash
+from .strategies.selector import select_strategy
 from .workitems.manager import (
     approve_goal,
     create_workitem,
     fork_workitem,
     get_active_id,
     list_workitems,
+    load_memory,
     load_workitem,
     reopen_workitem,
     save_state,
@@ -199,32 +205,6 @@ def _load_ws_paths(name: str) -> WorkspacePaths:
     return ws_paths
 
 
-def _ensure_ai_in_gitignore(project_root: Path) -> str:
-    """Add ``.ai/`` to the project's root .gitignore if not already present.
-
-    Returns ``"added"`` if the entry was appended to an existing file,
-    ``"created"`` if a new .gitignore was created, or ``"exists"`` if the
-    entry was already there.
-    """
-    gitignore = project_root / ".gitignore"
-    entry = f"{AI_DIRNAME}/"
-
-    if gitignore.is_file():
-        content = gitignore.read_text(encoding="utf-8")
-        lines = content.splitlines()
-        if any(line.strip().rstrip("/") == AI_DIRNAME.rstrip("/") for line in lines):
-            return "exists"
-        separator = "\n" if content and not content.endswith("\n") else ""
-        gitignore.write_text(
-            content + separator + f"\n# workitem-conductor\n{entry}\n",
-            encoding="utf-8",
-        )
-        return "added"
-
-    gitignore.write_text(f"# workitem-conductor\n{entry}\n", encoding="utf-8")
-    return "created"
-
-
 @app.command()
 def init() -> None:
     """Initialize the ``.ai/`` skeleton in the current repository."""
@@ -244,12 +224,6 @@ def init() -> None:
     else:
         console.print(f"\n[yellow]{rel}/ already initialized[/yellow] — nothing to do")
 
-    gitignore_status = _ensure_ai_in_gitignore(Path.cwd())
-    if gitignore_status == "added":
-        console.print(f"  [green]+[/green] .gitignore ← added [bold]{AI_DIRNAME}/[/bold]")
-    elif gitignore_status == "created":
-        console.print(f"  [green]+[/green] .gitignore (created) ← added [bold]{AI_DIRNAME}/[/bold]")
-
     from .workspaces import global_defaults_path
     has_globals = global_defaults_path().is_file()
     if has_globals:
@@ -265,6 +239,32 @@ def init() -> None:
         console.print("Then: [bold]conductor define \"<your goal>\"[/bold]")
 
 
+def _resolve_strategy(
+    paths: AiPaths, wi, strategy_override: str | None, *, reselect_if_unlocked: bool
+) -> None:
+    """Apply a `--strategy` override (locking it) or reselect via
+    `select_strategy()` unless the workitem's strategy is already locked.
+
+    Single-repo only — workspace workitems never call this (WorkspaceEngine
+    doesn't do strategy selection yet, see the M7 plan). Exits cleanly on an
+    unknown strategy name.
+    """
+    state = wi.state
+    if strategy_override:
+        try:
+            load_strategy(paths, strategy_override)
+        except StrategyNotFound as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+        state.strategy = strategy_override
+        state.strategy_locked = True
+        save_state(paths, state)
+        return
+    if reselect_if_unlocked and not state.strategy_locked:
+        state.strategy = select_strategy(wi.goal, state)
+        save_state(paths, state)
+
+
 @app.command()
 def define(
     goal: str = typer.Argument(
@@ -274,11 +274,21 @@ def define(
         None, "--workspace", "-w",
         help="Create a cross-project workitem in this workspace instead of the current repo."
     ),
+    strategy: str = typer.Option(
+        None, "--strategy", help="Pin a strategy instead of letting the selector choose."
+    ),
 ) -> None:
     """Create a workitem and an editable goal contract from a goal statement."""
     if not goal or not goal.strip():
         err_console.print(
             '[red]A goal is required.[/red]  Example: conductor define "fix the policy discovery bug"'
+        )
+        raise typer.Exit(code=1)
+
+    if workspace and strategy:
+        err_console.print(
+            "[red]--strategy is single-repo only for now[/red] — WorkspaceEngine "
+            "doesn't select a strategy yet, so `--strategy` has no effect with -w."
         )
         raise typer.Exit(code=1)
 
@@ -297,12 +307,14 @@ def define(
 
     paths = _load_paths()
     workitem = create_workitem(paths, goal)
+    _resolve_strategy(paths, workitem, strategy, reselect_if_unlocked=True)
 
     goal_file = workitem.directory / "goal.yml"
     rel = goal_file.relative_to(Path.cwd()) if goal_file.is_relative_to(Path.cwd()) else goal_file
     console.print(f"[green]Created workitem[/green] [bold]{workitem.workitem_id}[/bold]")
     console.print(f"  goal:  {rel}")
     console.print(f"  state: stage=[cyan]defined[/cyan] status=[yellow]draft[/yellow]")
+    console.print(f"  strategy: [magenta]{workitem.state.strategy}[/magenta]")
     console.print(
         "\nNext: run [bold]conductor refine[/bold] for AI-assisted scope/criteria,\n"
         f"or edit {rel} by hand — then [bold]conductor approve[/bold] and [bold]conductor execute[/bold]."
@@ -317,8 +329,18 @@ def approve(
     workspace: str = typer.Option(
         None, "--workspace", "-w", help="Approve a cross-project workitem in this workspace."
     ),
+    strategy: str = typer.Option(
+        None, "--strategy", help="Pin a strategy instead of reselecting from the refined goal."
+    ),
 ) -> None:
     """Approve the goal contract and mark the workitem ready to execute."""
+    if workspace and strategy:
+        err_console.print(
+            "[red]--strategy is single-repo only for now[/red] — WorkspaceEngine "
+            "doesn't select a strategy yet, so `--strategy` has no effect with -w."
+        )
+        raise typer.Exit(code=1)
+
     paths = _load_ws_paths(workspace) if workspace else _load_paths()
     wid = workitem_id or get_active_id(paths)
     if wid is None:
@@ -335,8 +357,16 @@ def approve(
 
     already_synced = wi.goal.approved and wi.state.status != "draft"
     if already_synced:
+        if not workspace and strategy:
+            _resolve_strategy(paths, wi, strategy, reselect_if_unlocked=False)
         console.print(f"[dim]{wid} is already approved and ready.[/dim]")
         return
+
+    # This is the evaluation that actually matters: by now `refine` (or a
+    # hand-edit) has filled in acceptance_criteria, so the selector has
+    # something real to read — unless a human already pinned one at `define`.
+    if not workspace:
+        _resolve_strategy(paths, wi, strategy, reselect_if_unlocked=True)
 
     updated = approve_goal(paths, wid)
     console.print(f"[green]Approved[/green] [bold]{updated.workitem_id}[/bold]")
@@ -345,6 +375,8 @@ def approve(
         f"status=[yellow]{updated.state.status}[/yellow] "
         f"next=[bold]{updated.state.next_action}[/bold]"
     )
+    if not workspace:
+        console.print(f"  strategy: [magenta]{updated.state.strategy}[/magenta]")
     console.print("\nNext: [bold]conductor execute[/bold]")
 
 
@@ -443,7 +475,7 @@ def refine(
         raise typer.Exit(code=1)
 
     if outcome.updated:
-        goal_rel = f".ai/workitems/{wid}/goal.yml"
+        goal_rel = paths.workitem_dir(wid) / "goal.yml"
         console.print(
             f"\n[green]Goal contract updated.[/green]  Review/edit [bold]{goal_rel}[/bold], "
             "then run [bold]conductor approve[/bold]."
@@ -504,6 +536,8 @@ def status(
     table.add_column("value")
     table.add_row("title", wi.state.title)
     table.add_row("flow", wi.state.flow)
+    if wi.state.strategy:
+        table.add_row("strategy", wi.state.strategy)
     table.add_row("stage", f"[cyan]{wi.state.stage}[/cyan]")
     table.add_row("status", f"[yellow]{wi.state.status}[/yellow]")
     table.add_row("next action", wi.state.next_action)
@@ -520,6 +554,223 @@ def status(
             "\n[dim]Goal not approved yet — refine goal.yml, then run "
             "`conductor approve`.[/dim]"
         )
+
+
+def _print_stop_reason(sr, *, indent: str = "  ") -> None:
+    """Print a ``StopReason`` — escaped, since its type/message/evidence come
+    from LLM output and may contain literal ``[...]`` that Rich would
+    otherwise try to interpret as markup."""
+    console.print(
+        f"{indent}[yellow]stopped:[/yellow] "
+        f"({_escape_markup(sr.type)}) {_escape_markup(sr.message)}"
+    )
+    for evidence in sr.evidence:
+        console.print(f"{indent}  [dim]-[/dim] {_escape_markup(evidence)}")
+
+
+def _print_run_summary(run) -> None:
+    table = Table(title=f"{run.run_id} · {run.status}")
+    table.add_column("role", style="bold")
+    table.add_column("provider")
+    table.add_column("ok", justify="center")
+    table.add_column("duration")
+    table.add_column("verdict")
+    for step in run.steps:
+        ok_mark = "[green]✓[/green]" if step.ok else "[red]✗[/red]"
+        role = f"[dim]{step.project_name}[/dim] {step.role}" if step.project_name else step.role
+        if step.phase_name:
+            role = f"[dim]phase {(step.phase_index or 0) + 1}: {step.phase_name}[/dim] {role}"
+        table.add_row(
+            role, step.provider, ok_mark,
+            f"{step.duration_sec:.1f}s", step.verdict or "",
+        )
+    console.print(table)
+    console.print(f"  [dim]{run.started_at} → {run.finished_at}[/dim]")
+    for step in run.steps:
+        if step.plan and (step.plan.phases or step.plan.risk_level):
+            if step.plan.risk_level:
+                console.print(f"  [dim]plan risk:[/dim] {_escape_markup(step.plan.risk_level)}")
+            for phase in step.plan.phases:
+                console.print(f"  [dim]phase:[/dim] {_escape_markup(phase.name)}")
+        if step.review and (
+            step.review.confidence is not None
+            or step.review.blocking_issues
+            or step.review.non_blocking_issues
+            or step.review.suggested_next_role
+        ):
+            if step.review.confidence is not None:
+                console.print(f"  [dim]review confidence:[/dim] {step.review.confidence}")
+            for issue in step.review.blocking_issues:
+                console.print(f"    [red]blocking:[/red] {_escape_markup(issue)}")
+            for issue in step.review.non_blocking_issues:
+                console.print(f"    [dim]non-blocking:[/dim] {_escape_markup(issue)}")
+            if step.review.suggested_next_role:
+                console.print(
+                    f"  [dim]suggested next role:[/dim] {_escape_markup(step.review.suggested_next_role)}"
+                )
+        if step.verify and (
+            step.verify.tests_run is not None
+            or step.verify.tests_passed is not None
+            or step.verify.acceptance_criteria_met is not None
+            or step.verify.notes
+        ):
+            console.print(
+                f"  [dim]verify:[/dim] tests_run={step.verify.tests_run} "
+                f"tests_passed={step.verify.tests_passed} "
+                f"acceptance_criteria_met={step.verify.acceptance_criteria_met}"
+            )
+            for note in step.verify.notes:
+                console.print(f"    [dim]-[/dim] {_escape_markup(note)}")
+    if run.stop_reason:
+        _print_stop_reason(run.stop_reason)
+
+
+@app.command()
+def inspect(
+    workitem_id: str = typer.Argument(
+        None, help="Workitem to inspect (defaults to the active one)."
+    ),
+    active: bool = typer.Option(
+        False, "--active",
+        help="Inspect the active workitem (the default when no id is given; "
+        "explicit form for scripts/muscle memory).",
+    ),
+    workspace: str = typer.Option(
+        None, "--workspace", "-w", help="Inspect a workitem from this workspace."
+    ),
+    runs: bool = typer.Option(
+        False, "--runs", help="List every run instead of just the latest."
+    ),
+    context: bool = typer.Option(
+        False, "--context", help="Show the latest run's per-step context sizes."
+    ),
+) -> None:
+    """Show a workitem's goal/state plus its run history and metrics."""
+    paths = _load_ws_paths(workspace) if workspace else _load_paths()
+    if workitem_id and active:
+        err_console.print("[red]Pass either a workitem id or --active, not both.[/red]")
+        raise typer.Exit(code=1)
+    wid = workitem_id or get_active_id(paths)
+    if wid is None:
+        err_console.print(
+            "[red]No workitem to inspect.[/red]  Run `conductor define \"<goal>\"` first."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        wi = load_workitem(paths, wid)
+    except FileNotFoundError:
+        err_console.print(f"[red]Workitem not found:[/red] {wid}")
+        raise typer.Exit(code=1)
+
+    state = wi.state
+    table = Table(show_header=False, title=f"Workitem: {wi.workitem_id}")
+    table.add_column("field", style="dim")
+    table.add_column("value")
+    table.add_row("title", state.title)
+    table.add_row("flow", state.flow)
+    if state.strategy:
+        table.add_row("strategy", state.strategy)
+    table.add_row("stage", f"[cyan]{state.stage}[/cyan]")
+    table.add_row("status", f"[yellow]{state.status}[/yellow]")
+    if state.total_phases:
+        table.add_row("phase", f"{state.current_phase_index + 1}/{state.total_phases}")
+    table.add_row("next action", state.next_action)
+    table.add_row("iterations", str(state.iterations))
+    table.add_row("fix iterations", str(state.fix_iterations))
+    table.add_row("reopen count", str(state.reopen_count))
+    if state.feature_branch:
+        table.add_row("feature branch", state.feature_branch)
+    table.add_row(
+        "open issues",
+        "\n".join(f"- {i}" for i in state.open_issues) or "[dim]none[/dim]",
+    )
+    console.print(table)
+
+    if state.stop_reason:
+        console.print()
+        _print_stop_reason(state.stop_reason)
+        console.print(
+            '  [dim]next:[/dim] resolve, then `conductor reopen "<what changed>"`'
+        )
+
+    memory = load_memory(paths, wid)
+    validation = memory.validation_status
+    if (
+        memory.current_summary
+        or memory.open_issues
+        or memory.resolved_issues
+        or memory.decisions
+        or validation.last_tests
+        or validation.failing
+    ):
+        console.print("\n[bold]Memory:[/bold]")
+        if memory.current_summary:
+            console.print(f"  {memory.current_summary.strip()}")
+        if memory.open_issues:
+            console.print("  [dim]open issues:[/dim]")
+            for issue in memory.open_issues:
+                console.print(f"    - {issue}")
+        if memory.resolved_issues:
+            console.print("  [dim]resolved issues:[/dim]")
+            for issue in memory.resolved_issues[-2:]:
+                console.print(f"    - {issue}")
+        if memory.decisions:
+            console.print("  [dim]recent decisions:[/dim]")
+            for decision in memory.decisions[-2:]:
+                console.print(f"    - {decision.decision}")
+        if validation.failing:
+            console.print("  [dim]failing tests:[/dim]")
+            for test in validation.failing:
+                console.print(f"    - {test}")
+        elif validation.last_tests:
+            console.print(f"  [dim]last test run:[/dim] {len(validation.last_tests)} passing")
+
+    run_ids = list_run_ids(wi.directory)
+    if not run_ids:
+        console.print("\n[dim]No runs yet — run `conductor execute`.[/dim]")
+        return
+
+    console.print()
+    ids_to_show = run_ids if runs else run_ids[-1:]
+    for run_id in ids_to_show:
+        run = load_run(wi.directory, run_id)
+        _print_run_summary(run)
+
+        metrics = load_metrics(wi.directory, run_id)
+        if metrics is not None:
+            ctx = metrics.context
+            console.print(
+                f"  [dim]context: {ctx.get('total_prompt_chars', 0)} chars total, "
+                f"{ctx.get('max_step_prompt_chars', 0)} max/step[/dim]"
+            )
+            if metrics.git is not None:
+                g = metrics.git
+                console.print(
+                    f"  [dim]git: {g['files_changed']} files, "
+                    f"+{g['insertions']}/-{g['deletions']}[/dim]"
+                )
+        if context:
+            for step in run.steps:
+                console.print(
+                    f"    [dim]{step.role}: prompt {step.prompt_chars} chars, "
+                    f"output {step.output_chars} chars[/dim]"
+                )
+        console.print()
+
+    # A workspace workitem has one worktree *per project*, not a single one at
+    # the workspace level — WorkspacePaths has no worktree_dir() to ask.
+    if hasattr(paths, "worktree_dir"):
+        wt_path = worktree_path(paths, wid)
+        if wt_path.is_dir():
+            diff_text = working_tree_diff(wt_path)
+            if diff_text and diff_text.strip():
+                console.print("[bold]Working tree diff:[/bold]")
+                console.print(diff_text.rstrip())
+            else:
+                console.print("[dim]Worktree has no uncommitted changes.[/dim]")
+        else:
+            console.print("[dim]No worktree present (accepted or reopened away).[/dim]")
 
 
 @app.command()
@@ -566,11 +817,21 @@ def execute(
         err_console.print(f"[red]Workitem not found:[/red] {wid}")
         raise typer.Exit(code=1)
 
+    strategy = None
+    if wi.state.strategy:
+        try:
+            strategy = load_strategy(paths, wi.state.strategy)
+        except StrategyNotFound as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+
     try:
-        flow = load_flow(paths, wi.state.flow)
+        flow = load_flow(paths, strategy.flow if strategy else wi.state.flow)
     except FlowNotFound as exc:
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
+    if strategy and strategy.max_fix_iterations is not None:
+        flow = flow.model_copy(update={"max_fix_iterations": strategy.max_fix_iterations})
 
     try:
         config = load_repo_config(paths)
@@ -578,7 +839,10 @@ def execute(
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
 
-    provider_for = build_provider_for(config, dry_run=dry_run)
+    provider_for = build_provider_for(
+        config, dry_run=dry_run, role_overrides=strategy.roles if strategy else None
+    )
+    context_config = (strategy.context if strategy else None) or config.context
 
     try:
         wt_path = create_worktree(paths, wid, source_branch=config.source_branch)
@@ -586,15 +850,21 @@ def execute(
         err_console.print(f"[red]Could not create worktree:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    engine = Engine(paths, flow, provider_for=provider_for, execution_cwd=wt_path)
+    engine = Engine(
+        paths, flow, provider_for=provider_for,
+        execution_cwd=wt_path, context_config=context_config,
+        strategy_name=wi.state.strategy,
+        strategy_hash=strategy_content_hash(paths, wi.state.strategy) if strategy else None,
+    )
 
     mode = "[yellow]dry-run[/yellow]" if dry_run else "providers from repo.yml"
+    strategy_suffix = f" · strategy [magenta]{wi.state.strategy}[/magenta]" if wi.state.strategy else ""
     console.print(
-        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan] · {mode}"
+        f"Executing [bold]{wid}[/bold] · flow [cyan]{flow.name}[/cyan]{strategy_suffix} · {mode}"
     )
     branch_from = f" · from [bold]{config.source_branch}[/bold]" if config.source_branch else ""
     console.print(
-        f"  [dim]worktree: .ai/worktrees/{wid} · branch: conductor/{wid}{branch_from}[/dim]\n"
+        f"  [dim]worktree: {wt_path} · branch: conductor/{wid}{branch_from}[/dim]\n"
     )
 
     spinner = _SpinnerGuard(stream=stream)
@@ -616,19 +886,23 @@ def execute(
         rel = step.output_path.relative_to(wi.directory).as_posix()
         extra = ""
         if step.verdict and step.verdict != "unknown":
-            color = "green" if step.verdict == "approved" else "yellow"
+            color = "green" if step.verdict in ("approved", "passed") else "yellow"
             extra = f" [{color}]{step.verdict}[/{color}]"
             if step.looped_back:
                 extra += " [dim]↩ fixing[/dim]"
+        phase_prefix = (
+            f"[dim]phase {(step.phase_index or 0) + 1}: {_escape_markup(step.phase_name)}[/dim] "
+            if step.phase_name else ""
+        )
         console.print(
-            f"  {mark} {step.role} [dim]({step.stage} · {step.provider} · {elapsed:.0f}s)[/dim] → {rel}{extra}"
+            f"  {mark} {phase_prefix}{step.role} [dim]({step.stage} · {step.provider} · {elapsed:.0f}s)[/dim] → {rel}{extra}"
         )
 
-        if step.role == "planner" and step.ok:
-            output = step.output_path.read_text(encoding="utf-8")
-            m = re.search(r"^BRANCH:\s*(\S+)", output, re.MULTILINE)
-            if m:
-                console.print(f"\n  [dim]Feature branch:[/dim] [bold]{m.group(1).strip()}[/bold] [dim](created on accept)[/dim]")
+        if step.role == "planner" and step.ok and step.plan and step.plan.branch:
+            console.print(
+                f"\n  [dim]Feature branch:[/dim] [bold]{_escape_markup(step.plan.branch)}[/bold] "
+                f"[dim](created on accept)[/dim]"
+            )
 
     try:
         with spinner:
@@ -648,11 +922,12 @@ def execute(
     if outcome.completed:
         console.print(
             f"\n[green]Flow completed.[/green] Final report: "
-            f"[bold].ai/workitems/{wid}/final_report.md[/bold]"
+            f"[bold]{paths.workitem_dir(wid) / 'final_report.md'}[/bold]"
         )
         console.print("Review it, then accept or reopen the workitem.")
     else:
-        console.print(f"\n[yellow]Stopped:[/yellow] {outcome.stopped_reason}")
+        console.print()
+        _print_stop_reason(outcome.stopped_reason, indent="")
         raise typer.Exit(code=1)
 
 
@@ -703,6 +978,7 @@ def _execute_workspace(
         provider_for,
         max_fix_iterations=ws_flow.max_fix_iterations,
         source_branch=config.source_branch,
+        flow_name=ws_flow.name,
     )
 
     mode = "[yellow]dry-run[/yellow]" if dry_run else "providers from workspace config"
@@ -783,7 +1059,8 @@ def _execute_workspace(
             f"[bold]conductor accept -w {workspace}[/bold]."
         )
     else:
-        console.print(f"\n[yellow]Stopped:[/yellow] {outcome.stopped_reason}")
+        console.print()
+        _print_stop_reason(outcome.stopped_reason, indent="")
         raise typer.Exit(code=1)
 
 
@@ -857,7 +1134,7 @@ def reopen(
             # Restarting from a later step (e.g. --from reviewer) — the
             # implementer's work in the worktree is still valid, keep it.
             console.print(
-                f"  [dim]worktree preserved at .ai/worktrees/{wid}[/dim]"
+                f"  [dim]worktree preserved at {wt_path}[/dim]"
             )
 
     updated = reopen_workitem(paths, wid, reason, step_index=step_index)
@@ -870,7 +1147,24 @@ def reopen(
         f"status=[yellow]{updated.state.status}[/yellow] "
         f"next=[bold]{updated.state.next_action}[/bold]"
     )
+    _summarize_on_reopen(paths, updated, reason, wt_path if wt_path.is_dir() else paths.cwd)
     console.print("\nNext: [bold]conductor execute[/bold]")
+
+
+def _summarize_on_reopen(paths: AiPaths, wi, reason: str, execution_cwd: Path) -> None:
+    """Best-effort summarizer call right after a reopen — never blocks it.
+
+    Reopen's job (resetting state) must stay reliable even if repo.yml is
+    missing/invalid or the summarizer's provider binding fails. Uses the
+    preserved worktree (when ``--from`` kept one) so the diff summarized
+    reflects the actual in-progress work, not the bare repo checkout.
+    """
+    try:
+        config = load_repo_config(paths)
+        provider_for = build_provider_for(config)
+        summarize(paths, wi, provider_for("summarizer"), "reopen", [], execution_cwd)
+    except Exception as exc:
+        console.print(f"  [dim]summarizer skipped: {exc}[/dim]")
 
 
 def _reopen_workspace(workspace: str, workitem_id: str | None, reason: str) -> None:
@@ -966,7 +1260,7 @@ def fork(
             f"  feature branch: [bold]{child.state.feature_branch}[/bold] (inherited)"
         )
     console.print(
-        f"  worktree: .ai/worktrees/{child.workitem_id}"
+        f"  worktree: {worktree_path(paths, child.workitem_id)}"
         f" · branch: conductor/{child.workitem_id}"
     )
     console.print(f"  branched from: conductor/{wid}")
@@ -1125,7 +1419,7 @@ _CLI_DEFAULTS: dict[str, dict] = {
     "qwen":      {"type": "cli_one_shot", "command": "qwen", "args": ["--approval-mode", "yolo"], "prompt_via": "arg", "timeout": 3600},
     "codex":     {"type": "cli_one_shot", "command": "codex", "args": [], "prompt_via": "stdin", "timeout": 3600},
 }
-_KNOWN_ROLES = ("refiner", "planner", "implementer", "reviewer", "validator")
+_KNOWN_ROLES = ("refiner", "planner", "implementer", "reviewer", "verifier")
 
 
 def _detect_available_clis() -> list[str]:
@@ -1386,12 +1680,19 @@ def doctor() -> None:
     """Check local prerequisites (``.ai/`` present, provider CLIs available)."""
     console.print(f"workitem-conductor [dim]v{__version__}[/dim]\n")
 
+    from .home import cache_home, config_home, data_home
+
+    console.print(f"Config home: {config_home() / 'conductor'}")
+    console.print(f"Data home:   {data_home() / 'conductor'}")
+    console.print(f"Cache home:  {cache_home() / 'conductor'}")
+
     paths: AiPaths | None = None
     try:
         paths = require_ai_paths()
-        console.print(f"[green]✓[/green] .ai/ found at {paths.root}")
+        console.print(f"\n[green]✓[/green] .ai/ found at {paths.root}")
+        console.print(f"  [dim]project data: {paths.data_dir}[/dim]")
     except AiRootNotFound:
-        console.print("[yellow]![/yellow] no .ai/ here — run `conductor init`")
+        console.print("\n[yellow]![/yellow] no .ai/ here — run `conductor init`")
 
     console.print("\nProvider CLIs (auth is managed by the CLI itself, not the conductor):")
     for name in KNOWN_PROVIDER_CLIS:

@@ -53,6 +53,7 @@ def _merge(base: RepoConfig, override: RepoConfig) -> RepoConfig:
         providers=merged_providers,
         roles=merged_roles,
         refine=override.refine,
+        context=override.context,
         source_branch=override.source_branch if override.source_branch is not None else base.source_branch,
         target_branch=override.target_branch if override.target_branch is not None else base.target_branch,
     )

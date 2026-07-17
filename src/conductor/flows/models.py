@@ -24,6 +24,10 @@ class Flow(BaseModel):
     name: str
     description: str = ""
     steps: list[FlowStep] = Field(default_factory=list)
+    #: an ordered sub-sequence (same FlowStep shape) the engine walks once per
+    #: planner phase, nested between the flow's own `planner` and `verifier`
+    #: steps. None for non-phased flows — `steps` alone is unaffected.
+    phase_flow: list[FlowStep] | None = None
     max_fix_iterations: int = 3
 
     def step_for_role(self, role: str) -> FlowStep | None:

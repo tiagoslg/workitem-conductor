@@ -42,11 +42,27 @@ class RefineConfig(BaseModel):
     max_question_rounds: int = 5
 
 
+class ContextConfig(BaseModel):
+    """Budget and section toggles for ``core/context.py::build_context``.
+
+    Curated memory (``memory.yml``, written by the ``summarizer`` role) is the
+    default context source; raw prior-step outputs are opt-in — flip
+    ``include_raw_outputs`` on for a repo that doesn't yet trust its summarizer.
+    """
+
+    max_prompt_chars: int = 64_000
+    include_raw_outputs: bool = False
+    include_memory: bool = True
+    include_last_diff: bool = True
+    include_last_review: bool = True
+
+
 class RepoConfig(BaseModel):
     name: str = "TODO"
     default_flow: str = "simple-change"
     providers: dict[str, ProviderConfig] = Field(default_factory=dict)
     roles: dict[str, RoleBinding] = Field(default_factory=dict)
     refine: RefineConfig = Field(default_factory=RefineConfig)
+    context: ContextConfig = Field(default_factory=ContextConfig)
     source_branch: str | None = None
     target_branch: str | None = None

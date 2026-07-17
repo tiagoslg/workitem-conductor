@@ -2,6 +2,8 @@
 
 This document summarizes the current thinking behind `workitem-conductor` so a local coding agent can continue the implementation from a clear starting point.
 
+> **Note:** this is the original design brief, written before implementation started. Some of it (notably the `.ai/`-relative runtime layout below) has since changed — runtime state (workitems, worktrees, active-workitem pointer) now lives under a central data home outside the repo, not under `.ai/`. See `README.md` ("What `init` writes") for the current layout and `docs/backlog-adjusted.md` for where this is headed next.
+
 ## Project name
 
 Repository: `workitem-conductor`
@@ -183,22 +185,14 @@ Suggested split:
   roles/                   # versionable role prompts/instructions
   hooks/                   # versionable deterministic checks
 
-  workitems/               # runtime/history, ignored by default
-  sessions/                # sandbox/session data, ignored by default
-  runs/                    # provider transcripts/logs, ignored by default
-  cache/                   # temporary context/cache, ignored by default
-```
-
-Default `.gitignore` recommendation:
-
-```gitignore
-.ai/workitems/
-.ai/sessions/
-.ai/runs/
-.ai/cache/
 ```
 
 Versionable configuration should be separated from runtime artifacts.
+**Current implementation:** rather than an ignored `workitems/`/`sessions/`/
+`runs/`/`cache/` subtree of `.ai/`, runtime artifacts live entirely outside the
+repo, under a central data home (`~/.local/share/conductor/projects/<id>/` —
+see `README.md`). `.ai/` holds only the versionable directories listed above
+and is not gitignored.
 
 ## Multi-repository workspaces
 
@@ -396,9 +390,10 @@ The first `execute` implementation may be semi-automatic or stubbed, but it shou
    - `.ai/roles/implementer.md`
    - `.ai/roles/reviewer.md`
 3. Implement a workitem id generator.
-4. Implement `conductor define <goal>` to create:
-   - `.ai/workitems/<id>/goal.yml`
-   - `.ai/workitems/<id>/status.yml`
+4. Implement `conductor define <goal>` to create (now under the central data
+   home, not `.ai/` — see the note above):
+   - `workitems/<id>/goal.yml`
+   - `workitems/<id>/status.yml`
 5. Implement `conductor status` to show the active/latest workitem.
 6. Implement a basic provider abstraction, initially with a dry-run provider that writes the prompt to a file.
 7. Implement `conductor execute --dry-run` to generate the next handoff instead of calling a real model.

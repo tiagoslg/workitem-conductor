@@ -12,11 +12,12 @@ by tests) → ``XDG_CONFIG_HOME`` → ``~/.config``, then ``conductor/workspaces
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError
+
+from .home import config_home
 
 DEFAULT_WORKSPACE = "default"
 
@@ -37,17 +38,6 @@ class WorkspaceRegistry(BaseModel):
     def workspace(self, name: str) -> Workspace:
         """Return the named workspace, creating an empty one if absent."""
         return self.workspaces.setdefault(name, Workspace())
-
-
-def config_home() -> Path:
-    """Resolve the config home directory (test-overridable)."""
-    override = os.environ.get("CONDUCTOR_CONFIG_HOME")
-    if override:
-        return Path(override)
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    if xdg:
-        return Path(xdg)
-    return Path.home() / ".config"
 
 
 def registry_path() -> Path:
@@ -119,7 +109,13 @@ def remove_project(
 
 
 def workspace_dir(name: str) -> Path:
-    """Return the directory for a named workspace's own state (config, workitems)."""
+    """Return the curated-config directory for a named workspace.
+
+    Holds ``config.yml``, ``instructions.md``, ``roles/``, ``flows/`` — the
+    workspace-level equivalent of a repo's ``.ai/``. Runtime state (workitems,
+    active-workitem pointer) lives elsewhere, under the central data home; see
+    ``WorkspacePaths.data_dir``.
+    """
     return config_home() / "conductor" / "workspaces" / name
 
 

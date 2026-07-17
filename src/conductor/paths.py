@@ -9,11 +9,32 @@ paths inside it.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .home import data_home
+
 AI_DIRNAME = ".ai"
+
+
+def _slug(text: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return text or "project"
+
+
+def _project_id(repo_root: Path) -> str:
+    """A stable, human-legible id for a repo's central data directory.
+
+    Derived from the resolved absolute path, so it stays stable across
+    invocations from different cwd/symlinks but changes if the repo is moved —
+    acceptable since there is no cross-path migration for runtime state.
+    """
+    resolved = str(repo_root.resolve())
+    digest = hashlib.sha1(resolved.encode()).hexdigest()[:8]
+    return f"{_slug(repo_root.name)}-{digest}"
 
 
 class AiRootNotFound(Exception):
@@ -54,23 +75,38 @@ class AiPaths:
         return self.root / "flows"
 
     @property
+    def strategies_dir(self) -> Path:
+        return self.root / "strategies"
+
+    @property
     def roles_dir(self) -> Path:
         return self.root / "roles"
 
     @property
+    def data_dir(self) -> Path:
+        """Central runtime storage for this project, outside the git-tracked repo.
+
+        Keyed by a project id derived from the repo's resolved path (see
+        ``_project_id``), under ``data_home()/projects/<id>/``. ``.ai/`` holds
+        only versionable config (repo.yml, instructions.md, flows/, roles/);
+        everything the conductor produces at runtime lives here instead.
+        """
+        return data_home() / "conductor" / "projects" / _project_id(self.cwd)
+
+    @property
     def workitems_dir(self) -> Path:
-        return self.root / "workitems"
+        return self.data_dir / "workitems"
 
     @property
     def active_pointer(self) -> Path:
-        return self.root / "active_workitem.txt"
+        return self.data_dir / "active_workitem.txt"
 
     def workitem_dir(self, workitem_id: str) -> Path:
         return self.workitems_dir / workitem_id
 
     @property
     def worktrees_dir(self) -> Path:
-        return self.root / "worktrees"
+        return self.data_dir / "worktrees"
 
     def worktree_dir(self, workitem_id: str) -> Path:
         return self.worktrees_dir / workitem_id
@@ -100,12 +136,14 @@ def require_ai_paths(start: Path | None = None) -> AiPaths:
 
 @dataclass(frozen=True)
 class WorkspacePaths:
-    """Well-known paths for a named workspace under the global config dir.
+    """Well-known paths for a named workspace.
 
-    Workspace workitems (cross-project analysis) live here, separate from
-    any single repo's ``.ai/`` directory. The workspace has its own config,
-    instructions, and workitems dir, but no flows dir — workspace workitems
-    are not executed through the engine, only defined and refined.
+    ``root`` (``~/.config/conductor/workspaces/<name>/``) holds curated,
+    versionable-ish config: ``config.yml``, ``instructions.md``, ``roles/``,
+    ``flows/`` — the workspace-level equivalent of a repo's ``.ai/``. Runtime
+    state (workitems, the active-workitem pointer) is *not* under ``root`` —
+    it lives under the central data home instead (``data_dir``, mirroring
+    ``AiPaths.data_dir`` for single-repo projects), keyed by workspace name.
     """
 
     root: Path          # ~/.config/conductor/workspaces/<name>/
@@ -125,12 +163,16 @@ class WorkspacePaths:
         return self.root / "roles"
 
     @property
+    def data_dir(self) -> Path:
+        return data_home() / "conductor" / "workspaces" / self.name
+
+    @property
     def workitems_dir(self) -> Path:
-        return self.root / "workitems"
+        return self.data_dir / "workitems"
 
     @property
     def active_pointer(self) -> Path:
-        return self.root / "active_workitem.txt"
+        return self.data_dir / "active_workitem.txt"
 
     def workitem_dir(self, workitem_id: str) -> Path:
         return self.workitems_dir / workitem_id

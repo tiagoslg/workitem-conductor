@@ -14,6 +14,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
+from ..core.yaml_utils import coerce_str_list
+
 Stage = Literal[
     "defined",
     "planning",
@@ -82,24 +84,7 @@ class GoalContract(BaseModel):
     )
     @classmethod
     def _coerce_str_list(cls, v: object) -> object:
-        """Coerce non-string list items to strings.
-
-        YAML parses a list item that ends with ``:`` as a mapping key, turning
-        ``- Verify the endpoint:`` into ``{"Verify the endpoint": ...}``.
-        Round-trip the mapping through yaml.dump so the item is still readable
-        rather than raising a ValidationError that crashes ``conductor status``.
-        """
-        if not isinstance(v, list):
-            return v
-        result: list[str] = []
-        for item in v:
-            if isinstance(item, str):
-                result.append(item)
-            elif item is not None:
-                result.append(
-                    yaml.dump(item, default_flow_style=False, allow_unicode=True).strip()
-                )
-        return result
+        return coerce_str_list(v)
 
     def to_yaml(self) -> str:
         return _dump_yaml(self.model_dump())
@@ -114,19 +99,44 @@ class HistoryEntry(BaseModel):
     summary: str
 
 
+class StopReason(BaseModel):
+    """Why a run stopped — shared by ``WorkitemState`` and ``RunRecord`` so
+    both describe the same event the same way, not a display string that can
+    drift from a structured field.
+
+    ``type`` is a plain ``str``, not a strict ``Literal`` — same "don't crash
+    on an unexpected value" posture already used for stage/status/next_action
+    on ``WorkitemState``.
+    """
+
+    type: str = "other"
+    message: str
+    evidence: list[str] = Field(default_factory=list)
+
+
 class WorkitemState(BaseModel):
     """Compact, evolvable execution state for a single workitem."""
 
     workitem_id: str
     title: str
     flow: str = "simple-change"
+    strategy: str | None = None
+    #: True once a human has explicitly pinned `strategy` via `--strategy` —
+    #: `approve`'s automatic reselection skips a locked workitem.
+    strategy_locked: bool = False
     stage: str = "defined"
     status: str = "draft"
     next_action: str = "approve_goal"
     step_index: int = 0
     iterations: int = 0
     fix_iterations: int = 0
+    reopen_count: int = 0
+    #: descriptive only — meaningful during/after a phased-flow run
+    #: (`Flow.phase_flow` set); 0/0 for non-phased flows.
+    current_phase_index: int = 0
+    total_phases: int = 0
     feature_branch: str | None = None
+    stop_reason: StopReason | None = None
     open_issues: list[str] = Field(default_factory=list)
     human_overrides: list[str] = Field(default_factory=list)
     artifacts: dict[str, str | None] = Field(default_factory=dict)
@@ -145,4 +155,40 @@ class WorkitemState(BaseModel):
 
     @classmethod
     def from_yaml(cls, text: str) -> "WorkitemState":
+        return cls.model_validate(yaml.safe_load(text) or {})
+
+
+class Decision(BaseModel):
+    """A recorded decision — most often written by the summarizer role."""
+
+    at: str = Field(default_factory=utcnow_iso)
+    by: str = "summarizer"
+    decision: str
+
+
+class ValidationStatus(BaseModel):
+    last_tests: list[str] = Field(default_factory=list)
+    failing: list[str] = Field(default_factory=list)
+
+
+class MemoryRecord(BaseModel):
+    """Curated, human/LLM-written state of a workitem — the antidote to
+    resending every prior raw output on each reopen (see ``core/context.py``).
+
+    ``current_summary`` and ``open_issues`` represent *current* state and are
+    replaced wholesale on each update; ``decisions``/``resolved_issues`` are
+    an append-only history (see ``core/summarize.py::merge_memory``).
+    """
+
+    current_summary: str = ""
+    decisions: list[Decision] = Field(default_factory=list)
+    open_issues: list[str] = Field(default_factory=list)
+    resolved_issues: list[str] = Field(default_factory=list)
+    validation_status: ValidationStatus = Field(default_factory=ValidationStatus)
+
+    def to_yaml(self) -> str:
+        return _dump_yaml(self.model_dump())
+
+    @classmethod
+    def from_yaml(cls, text: str) -> "MemoryRecord":
         return cls.model_validate(yaml.safe_load(text) or {})

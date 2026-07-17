@@ -26,6 +26,8 @@ from ..providers.base import Provider, ProviderRequest
 from ..workitems.manager import Workitem, load_workitem, save_goal, save_state
 from ..workitems.models import GoalContract, utcnow_iso
 from .context import load_role_prompt
+from .yaml_utils import FENCE_RE as _FENCE_RE
+from .yaml_utils import preprocess_yaml as _preprocess_yaml
 
 #: Resolves the provider for a role, exactly as the engine consumes it.
 ProviderFor = Callable[[str], Provider]
@@ -50,7 +52,6 @@ _CONTRACT_FIELDS = (
 # leading decoration and an optional trailing colon.
 _CONTRACT_RE = re.compile(r"(?im)^[ \t>#*`]*CONTRACT\b[ \t]*:?")
 _QUESTIONS_RE = re.compile(r"(?im)^[ \t>#*`]*QUESTIONS\b[ \t]*:?")
-_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _LIST_MARKER_RE = re.compile(r"^(?:\d+[.)]|[-*])\s*")
 _CONTRACT_KEYS = set(_CONTRACT_FIELDS)
 
@@ -62,39 +63,6 @@ class RefineResponse:
     kind: str
     questions: list[str] = field(default_factory=list)
     contract: dict | None = None
-
-
-def _preprocess_yaml(text: str) -> str | None:
-    """Quote list-item values that contain YAML flow indicators or bare colons.
-
-    Handles the two most common model mistakes in contract YAML:
-    - TypeScript-like syntax: ``{ type: 'x'|'y' }`` (flow indicators).
-    - Bare colon-space mid-sentence: ``at minimum: broken refs`` (YAML would
-      parse the list item as a nested mapping instead of a plain string).
-
-    Only touches single-line list items (``- value``); leaves mapping keys,
-    already-quoted values, and multi-line block scalars alone.
-    Returns the preprocessed string if it then parses cleanly, else None.
-    """
-    lines = []
-    for line in text.splitlines():
-        m = re.match(r'^(\s*-\s+)(.+)$', line)
-        if m:
-            value = m.group(2)
-            needs_quoting = (
-                re.search(r'[{|}]', value)    # flow indicators
-                or re.search(r'\S:\s', value)  # colon-space mid-sentence
-                or re.search(r'\S:$', value)   # trailing colon → YAML mapping key
-            )
-            if needs_quoting and not (value.startswith('"') or value.startswith("'")):
-                line = m.group(1) + '"' + value.replace('"', '\\"') + '"'
-        lines.append(line)
-    cleaned = "\n".join(lines)
-    try:
-        yaml.safe_load(cleaned)
-        return cleaned
-    except yaml.YAMLError:
-        return None
 
 
 def _contract_list_items_are_strings(data: dict) -> bool:

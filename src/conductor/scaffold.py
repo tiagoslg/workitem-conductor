@@ -1,9 +1,11 @@
 """Default ``.ai/`` content written by ``conductor init``.
 
-The split is deliberate: everything written here is *versionable* configuration
-that teaches the conductor how to work in this repo (config, flow, role prompts).
-Runtime artifacts (workitems/, sessions/, runs/, cache/) are created lazily and
-git-ignored via the ``.ai/.gitignore`` written below.
+Everything written here is *versionable* configuration that teaches the
+conductor how to work in this repo (config, flow, role prompts). Runtime
+artifacts (workitems, worktrees, the active-workitem pointer) never live under
+``.ai/`` — they're created lazily under the central data home
+(``AiPaths.data_dir``, see ``paths.py``), so there is nothing here to
+git-ignore.
 
 ``scaffold_ai`` is idempotent: it never overwrites a file the user may have
 edited; it only creates what is missing and reports created vs skipped.
@@ -49,9 +51,17 @@ default_flow: simple-change
 #   planner:     { provider: codex_cli }
 #   implementer: { provider: codex_cli }
 #   reviewer:    { provider: claude_cli }
+#   summarizer:  { provider: codex_cli }   # updates memory.yml after each run/reopen
 #
 # refine:
 #   max_question_rounds: 5   # cap on clarifying-question rounds in `refine`
+#
+# context:
+#   max_prompt_chars: 64000       # overall prompt budget; optional sections trim first
+#   include_raw_outputs: false    # off by default — memory.yml is the curated source
+#   include_memory: true
+#   include_last_diff: true
+#   include_last_review: true
 #
 # Branch strategy (optional — defaults to current HEAD if unset):
 # source_branch: main     # worktrees are created from this branch
@@ -76,7 +86,7 @@ SIMPLE_CHANGE_FLOW = """\
 # Flow: simple-change
 # The smallest loop that preserves safety. Steps reference roles by name only.
 name: simple-change
-description: Plan, implement, review (with a fix loop), validate, report.
+description: Plan, implement, review (with a fix loop), verify, report.
 steps:
   - role: planner
     stage: planning
@@ -88,9 +98,87 @@ steps:
     # implementer (stage `fixing`) and re-reviews, up to max_fix_iterations.
     gate: review
     on_changes: implementer
-  - role: validator
-    stage: validating
+  - role: verifier
+    stage: verifying
+    # On a `failed` verdict the conductor loops back to the implementer too —
+    # shares the same fix-iteration budget as the review gate above.
+    gate: verify
+    on_changes: implementer
 max_fix_iterations: 3
+"""
+
+PHASED_CHANGE_FLOW = """\
+# Flow: phased-change
+# For changes the planner breaks into multiple phases — the implementer and
+# reviewer run once per phase (each phase gated by its own review/fix loop,
+# all sharing one max_fix_iterations budget), then a single verifier checks
+# the whole change once every phase has completed.
+name: phased-change
+description: Plan (with phases), implement + review per phase, then a final verify.
+steps:
+  - role: planner
+    stage: planning
+  - role: verifier
+    stage: verifying
+    # On a `failed` verdict, since `implementer` only exists in phase_flow
+    # below (not in this top-level steps list), the conductor redoes just
+    # the last phase rather than jumping to an invalid top-level step.
+    gate: verify
+    on_changes: implementer
+# Walked once per phase in the planner's `phases:` list. If the planner
+# emitted no phases, this runs once against an implicit single phase instead
+# of doing nothing.
+phase_flow:
+  - role: implementer
+    stage: implementing
+  - role: reviewer
+    stage: reviewing
+    gate: review
+    on_changes: implementer
+max_fix_iterations: 3
+"""
+
+SIMPLE_CHANGE_STRATEGY = """\
+# Strategy: simple-change
+# The default — identical behavior to running with no strategy at all.
+# Every field below is optional; omitted ones inherit repo.yml's value.
+name: simple-change
+flow: simple-change
+description: Default strategy — no overrides on top of repo.yml.
+"""
+
+BUGFIX_STRATEGY = """\
+# Strategy: bugfix
+# A bugfix should converge faster than a general change — tighter fix-loop cap.
+# Not reached by the automatic selector yet (no bugfix-detecting rule) — bind
+# it explicitly with `--strategy bugfix`.
+name: bugfix
+flow: simple-change
+description: Tighter fix-loop cap for small, well-scoped bug fixes.
+max_fix_iterations: 2
+"""
+
+CONTEXT_HEAVY_CHANGE_STRATEGY = """\
+# Strategy: context-heavy-change
+# For workitems that benefit from full context (many reopens, a change that
+# touches unfamiliar code) rather than the default curated-memory summary.
+name: context-heavy-change
+flow: simple-change
+description: Larger prompt budget, raw prior outputs included instead of just curated memory.
+context:
+  max_prompt_chars: 96000
+  include_raw_outputs: true
+"""
+
+PHASED_DOCUMENTATION_STRATEGY = """\
+# Strategy: phased-documentation
+# Docs-heavy changes benefit from a per-phase implement+review loop instead
+# of one big pass — uses the phased-change flow, so the implementer/reviewer
+# run once per phase the planner identifies, with a single verifier check
+# once every phase has completed.
+name: phased-documentation
+flow: phased-change
+description: Per-phase implement + review for docs-heavy work, then a final verify.
 """
 
 PLANNER_MD = """\
@@ -104,17 +192,31 @@ implementer can execute with minimal independent decisions.
 - the repository and its instructions.
 
 ## Output
-The **first line** of your response must be:
+The **first block** of your response must be a fenced YAML block:
 
-    BRANCH: feat/<kebab-slug>
+    ```yaml
+    branch: feat/<kebab-slug>
+    phases:
+      - name: <short phase name>
+        goal: <what this phase accomplishes>
+        files_likely_touched:
+          - <relative/path/one>
+          - <relative/path/two>
+    risk_level: low|medium|high
+    ```
 
-where `<kebab-slug>` is a short, lowercase, hyphen-separated name derived from
-the goal (e.g. `feat/add-human-readable-size`). The conductor reads it to
-suggest a working branch before implementation starts.
+- `branch` — a short, lowercase, hyphen-separated name derived from the goal
+  (e.g. `feat/add-human-readable-size`). The conductor reads it to suggest a
+  working branch before implementation starts.
+- `phases` — the plan broken into ordered phases. A single-phase change still
+  gets a one-item list; don't force a split that doesn't exist.
+- `risk_level` — your own assessment of how likely this change is to have
+  wide-reaching or hard-to-reverse effects.
 
-Then write the implementation plan. Assume the implementer **cannot read the
-repository** — it will only see this plan, the goal contract, and nothing else.
-Every decision the implementer needs to make must be answered here.
+After the YAML block, write the implementation plan in prose. Assume the
+implementer **cannot read the repository** — it will only see this plan, the
+goal contract, and nothing else. Every decision the implementer needs to make
+must be answered here.
 
 The plan must cover at minimum:
 - objective and current state (what exists, what is broken or missing);
@@ -127,12 +229,33 @@ The plan must cover at minimum:
 - any ambiguity that requires stopping to ask the human.
 
 ## Rules
-- always emit `BRANCH: feat/<kebab-slug>` as the very first line — no preamble;
+- always emit the fenced YAML block first — no preamble before it;
 - do not write production code — write instructions precise enough that someone
   else can write it correctly the first time;
 - do not expand the approved scope — surface scope changes as a stop condition;
 - prefer the smallest plan that satisfies the acceptance criteria;
 - name every file path explicitly; do not say "update the relevant files".
+
+## Safety
+
+If the approved goal contract would require any of the following to satisfy,
+stop instead of planning around it:
+
+    STOP: scope_change
+    <what would need to expand beyond the approved scope, and why>
+
+    STOP: secrets_access
+    <what secret/credential access this would require>
+
+    STOP: dangerous_command
+    <what destructive/irreversible command this would require>
+
+    STOP: production_access
+    <what production system or data this would touch>
+
+When triggered, emit the `STOP:` line as the very first line of your response
+instead of the YAML block — it takes priority over your normal output and
+hands the workitem back to a human immediately.
 """
 
 IMPLEMENTER_MD = """\
@@ -154,6 +277,27 @@ You implement the approved plan within the approved scope.
 - follow the repository instructions and conventions;
 - keep changes focused and reviewable;
 - run available tests/checks and report the result honestly.
+
+## Safety
+
+If completing the plan would require any of the following, stop instead of
+improvising:
+
+    STOP: scope_change
+    <what would need to expand beyond the approved scope, and why>
+
+    STOP: secrets_access
+    <what secret/credential access this would require>
+
+    STOP: dangerous_command
+    <what destructive/irreversible command this would require>
+
+    STOP: production_access
+    <what production system or data this would touch>
+
+Emit the `STOP:` line as the first line of your response when triggered — it
+takes priority over your normal output and hands the workitem back to a human
+immediately.
 """
 
 REVIEWER_MD = """\
@@ -172,12 +316,111 @@ A review that ends with exactly one verdict line, on its own line:
   blocking issues to fix. The conductor loops back to the implementer with
   your feedback, up to the flow's max fix iterations.
 
+Optionally, after the verdict line, add a fenced YAML block with more
+structured detail:
+
+    ```yaml
+    confidence: 0.0-1.0
+    blocking_issues:
+      - <issue that must be fixed before approval>
+    non_blocking_issues:
+      - <issue worth noting but not blocking>
+    suggested_next_role: implementer
+    ```
+
+This is informational only — the `REVIEW:` line alone still drives the fix
+loop; the YAML block just gives the human (and `conductor inspect`) more to
+go on.
+
 ## Rules
 - be specific and actionable; each blocker should be independently fixable;
 - check correctness against acceptance criteria first, then quality;
 - do not request changes outside the approved scope;
 - always emit the verdict line — it drives the fix loop;
 - if you and the implementer disagree irreconcilably, flag it for the human.
+
+## Safety
+
+If the implementation itself required any of the following, stop instead of
+reviewing normally — raise this even if the implementer didn't self-report it:
+
+    STOP: scope_change
+    <what expanded beyond the approved scope, and why>
+
+    STOP: secrets_access
+    <what secret/credential access was used>
+
+    STOP: dangerous_command
+    <what destructive/irreversible command was used>
+
+    STOP: production_access
+    <what production system or data was touched>
+
+Emit the `STOP:` line as the first line of your response when triggered — it
+takes priority over your verdict line and hands the workitem back to a human
+immediately.
+"""
+
+VERIFIER_MD = """\
+# Role: verifier
+
+You perform objective validation of the implementation, after the reviewer
+has approved it: run or indicate what tests were run, and confirm the result
+actually meets the goal contract's acceptance criteria — not just that the
+code looks right.
+
+## Output
+A response that ends with exactly one verdict line, on its own line:
+
+    VERIFY: passed
+    VERIFY: failed
+
+- `passed` — you ran (or clearly indicated how to run) the relevant tests,
+  they pass, and the acceptance criteria are met;
+- `failed` — precede the line with what specifically didn't pass or wasn't
+  met. The conductor loops back to the implementer with your findings, up to
+  the flow's max fix iterations (shared with the reviewer's own fix loop).
+
+Optionally, after the verdict line, add a fenced YAML block with structured
+detail:
+
+    ```yaml
+    tests_run: true
+    tests_passed: true
+    acceptance_criteria_met: true
+    notes:
+      - <anything worth recording, blocking or not>
+    ```
+
+## Rules
+- prefer actually running tests/checks over asserting they'd pass;
+- check every acceptance criterion explicitly, not just the obvious ones;
+- do not request changes outside the approved scope;
+- always emit the verdict line — it drives the fix loop;
+- if you cannot determine pass/fail with confidence, say so in `notes` rather
+  than guessing — an honest `unknown`-shaped verdict block is better than a
+  confident wrong one (an absent `VERIFY:` line is treated as passed).
+
+## Safety
+
+If verifying the implementation would require any of the following, stop
+instead of proceeding — raise this even if no earlier role self-reported it:
+
+    STOP: scope_change
+    <what expanded beyond the approved scope, and why>
+
+    STOP: secrets_access
+    <what secret/credential access this would require>
+
+    STOP: dangerous_command
+    <what destructive/irreversible command this would require>
+
+    STOP: production_access
+    <what production system or data this would touch>
+
+Emit the `STOP:` line as the first line of your response when triggered — it
+takes priority over your verdict line and hands the workitem back to a human
+immediately.
 """
 
 REFINER_MD = """\
@@ -233,6 +476,51 @@ line. Emit one — and only one — per response, on its own line:
   enclosed in single or double quotes.
 """
 
+SUMMARIZER_MD = """\
+# Role: summarizer
+
+You curate `memory.yml` — the workitem's *current* state in your own words —
+so later steps don't need to re-read every prior raw output. You are called
+after a run finishes, stops, loops back for a fix, or is reopened.
+
+## Inputs
+- the goal contract and current state (stage/status/trigger);
+- the existing memory (if any) — your previous summary, open issues, decisions;
+- the steps that ran in this pass, and the working-tree diff so far.
+
+## Output
+
+Emit exactly one marker line, on its own line, followed by a fenced YAML block:
+
+    SUMMARY:
+    ```yaml
+    current_summary: >
+      One paragraph: what this workitem is doing and where it stands right now.
+    open_issues:
+      - Things that still need fixing, in plain language.
+    decisions:
+      - Any non-obvious call made (e.g. "kept the old field name for compat").
+    resolved_issues:
+      - Issues from the previous summary that are now fixed (leave off ones
+        still open — they belong in open_issues).
+    validation_status:
+      last_tests: []   # commands run to check the result, if any
+      failing: []       # tests/checks currently failing, if any
+    ```
+
+## Rules
+
+- `current_summary` and `open_issues` replace the previous ones — write the
+  full current picture, not a diff of what changed;
+- `decisions` and `resolved_issues` are additive history — only include *new*
+  ones since the last summary, not ones already recorded;
+- keep `current_summary` to one tight paragraph — this is what every later
+  prompt will carry forward, not a transcript;
+- **start your reply with `SUMMARY:`** — no preamble before it, it drives the parser;
+- if there is genuinely nothing new to record, still emit `SUMMARY:` with the
+  same `current_summary` as before rather than omitting the marker.
+"""
+
 WORKSPACE_CHANGE_FLOW = """\
 # Flow: workspace-change
 # Cross-project execution: planner runs once with full workspace context;
@@ -275,15 +563,24 @@ Each per-project section must cover:
 - tests to add or update;
 - any ambiguity that requires stopping to ask the human.
 
-The **first line** of your response must be:
+The **first block** of your response must be a fenced YAML block:
 
-    BRANCH: feat/<kebab-slug>
+    ```yaml
+    branch: feat/<kebab-slug>
+    phases:
+      - name: <short phase name>
+        goal: <what this phase accomplishes>
+        files_likely_touched:
+          - <relative/path/one>
+    risk_level: low|medium|high
+    ```
 
-Use the same branch name across all projects (the conductor creates per-project
-worktrees on `conductor/<workitem-id>` automatically; the BRANCH hint is for
-the human's reference).
+Use the same `branch` name across all projects (the conductor creates
+per-project worktrees on `conductor/<workitem-id>` automatically; the
+`branch` field is for the human's reference).
 
 ## Rules
+- always emit the fenced YAML block first — no preamble before it;
 - label each section clearly: `## Project: <name>` where `<name>` matches the
   entry in `target_projects` exactly;
 - do not expand the approved scope;
@@ -326,17 +623,6 @@ Describe:
 Keep this short and concrete.
 """
 
-AI_GITIGNORE = """\
-# Runtime artifacts — not versioned by default.
-workitems/
-worktrees/
-sessions/
-runs/
-cache/
-active_workitem.txt
-"""
-
-
 @dataclass
 class ScaffoldResult:
     created: list[str] = field(default_factory=list)
@@ -348,11 +634,17 @@ _FILES: tuple[tuple[str, str], ...] = (
     ("repo.yml", REPO_YML),
     ("instructions.md", INSTRUCTIONS_MD),
     ("flows/simple-change.yml", SIMPLE_CHANGE_FLOW),
+    ("flows/phased-change.yml", PHASED_CHANGE_FLOW),
+    ("strategies/simple-change.yml", SIMPLE_CHANGE_STRATEGY),
+    ("strategies/bugfix.yml", BUGFIX_STRATEGY),
+    ("strategies/context-heavy-change.yml", CONTEXT_HEAVY_CHANGE_STRATEGY),
+    ("strategies/phased-documentation.yml", PHASED_DOCUMENTATION_STRATEGY),
     ("roles/planner.md", PLANNER_MD),
     ("roles/implementer.md", IMPLEMENTER_MD),
     ("roles/reviewer.md", REVIEWER_MD),
+    ("roles/verifier.md", VERIFIER_MD),
     ("roles/refiner.md", REFINER_MD),
-    (".gitignore", AI_GITIGNORE),
+    ("roles/summarizer.md", SUMMARIZER_MD),
 )
 
 

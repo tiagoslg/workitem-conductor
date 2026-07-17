@@ -73,6 +73,7 @@ def test_active_pointer_round_trip(paths: AiPaths):
 
 
 def test_get_active_id_ignores_missing_dir(paths: AiPaths):
+    paths.active_pointer.parent.mkdir(parents=True, exist_ok=True)
     paths.active_pointer.write_text("nonexistent-id\n", encoding="utf-8")
     assert get_active_id(paths) is None
 
@@ -155,6 +156,17 @@ def test_reopen_overwrites_previous_reopen_md(paths: AiPaths):
     reopen_workitem(paths, wi.workitem_id, "second reason")
     reopen_file = paths.workitem_dir(wi.workitem_id) / "reopen.md"
     assert reopen_file.read_text(encoding="utf-8") == "second reason"
+
+
+def test_reopen_increments_reopen_count(paths: AiPaths):
+    wi = create_workitem(paths, "count reopens")
+    assert load_workitem(paths, wi.workitem_id).state.reopen_count == 0
+
+    first = reopen_workitem(paths, wi.workitem_id, "first reason")
+    assert first.state.reopen_count == 1
+
+    second = reopen_workitem(paths, wi.workitem_id, "second reason")
+    assert second.state.reopen_count == 2
 
 
 def test_save_and_load_state(paths: AiPaths):

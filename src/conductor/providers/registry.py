@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from ..config.models import ProviderConfig, RepoConfig
+from ..config.models import ProviderConfig, RepoConfig, RoleBinding
 from .api import ApiProvider
 from .base import Provider
 from .cli_one_shot import CliOneShotProvider
@@ -73,15 +73,26 @@ def build_provider(name: str, config: ProviderConfig) -> Provider:
     )
 
 
-def build_provider_for(config: RepoConfig, dry_run: bool = False) -> ProviderFor:
-    """Return a ``role -> Provider`` resolver, caching one instance per provider."""
+def build_provider_for(
+    config: RepoConfig,
+    dry_run: bool = False,
+    role_overrides: dict[str, RoleBinding] | None = None,
+) -> ProviderFor:
+    """Return a ``role -> Provider`` resolver, caching one instance per provider.
+
+    ``role_overrides`` (from a workitem's active ``Strategy``) overlays
+    ``config.roles`` — a strategy can only change which provider a role is
+    *bound* to, never define a new provider; the provider definitions
+    (type/command/args/...) always come from ``config.providers``.
+    """
     fallback = DryRunProvider()
     cache: dict[str, Provider] = {}
+    roles = {**config.roles, **(role_overrides or {})}
 
     def resolve(role: str) -> Provider:
         if dry_run:
             return fallback
-        binding = config.roles.get(role)
+        binding = roles.get(role)
         if binding is None:
             return fallback
         provider_name = binding.provider

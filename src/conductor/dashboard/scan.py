@@ -34,8 +34,8 @@ def _project_view(path: str) -> dict:
     root = Path(path)
     ai_root = root / ".ai"
     view: dict = {"path": path, "name": root.name, "workitems": []}
-    if not (ai_root / "workitems").is_dir():
-        view["error"] = "no .ai/ workitems here (run `conductor init`)"
+    if not ai_root.is_dir():
+        view["error"] = "no .ai/ here (run `conductor init`)"
         return view
     try:
         paths = AiPaths(root=ai_root)

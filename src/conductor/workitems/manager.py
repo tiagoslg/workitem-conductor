@@ -1,8 +1,9 @@
 """Workitem lifecycle: id generation, creation, state I/O and the active pointer.
 
-A workitem lives in ``.ai/workitems/<id>/`` and owns its goal contract, state and
-(later) provider outputs/reviews. Ids follow the reference convention
-``YYYY-MM-DD_<slug>`` so they sort chronologically and read clearly.
+A workitem lives in ``<AiPaths.data_dir>/workitems/<id>/`` — the central data
+home, not ``.ai/`` — and owns its goal contract, state and (later) provider
+outputs/reviews. Ids follow the reference convention ``YYYY-MM-DD_<slug>`` so
+they sort chronologically and read clearly.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from datetime import date
 from pathlib import Path
 
 from ..paths import AiPaths
-from .models import GoalContract, Scope, WorkitemState
+from .models import GoalContract, MemoryRecord, Scope, WorkitemState
 
 _SLUG_MAX_WORDS = 8
 
@@ -62,6 +63,14 @@ def _goal_path(directory: Path) -> Path:
 
 def _state_path(directory: Path) -> Path:
     return directory / "state.yml"
+
+
+def _memory_path(directory: Path) -> Path:
+    return directory / "memory.yml"
+
+
+def _current_summary_path(directory: Path) -> Path:
+    return directory / "context" / "current_summary.md"
 
 
 def create_workitem(paths: AiPaths, goal: str, flow: str = "simple-change") -> Workitem:
@@ -116,6 +125,23 @@ def save_goal(paths: AiPaths, workitem_id: str, goal: GoalContract) -> None:
     _goal_path(directory).write_text(goal.to_yaml(), encoding="utf-8")
 
 
+def load_memory(paths: AiPaths, workitem_id: str) -> MemoryRecord:
+    """Return the workitem's curated memory, or an empty record if none yet."""
+    path = _memory_path(paths.workitem_dir(workitem_id))
+    if not path.is_file():
+        return MemoryRecord()
+    return MemoryRecord.from_yaml(path.read_text(encoding="utf-8"))
+
+
+def save_memory(paths: AiPaths, workitem_id: str, memory: MemoryRecord) -> None:
+    """Persist ``memory`` to ``memory.yml`` and a plain-text ``context/current_summary.md``."""
+    directory = paths.workitem_dir(workitem_id)
+    _memory_path(directory).write_text(memory.to_yaml(), encoding="utf-8")
+    summary_path = _current_summary_path(directory)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(memory.current_summary.strip() + "\n", encoding="utf-8")
+
+
 def approve_goal(paths: AiPaths, workitem_id: str) -> Workitem:
     """Mark the goal approved and advance the state so the two stay in sync.
 
@@ -157,6 +183,8 @@ def reopen_workitem(
     state.status = "ready"
     state.next_action = "execute"
     state.fix_iterations = 0
+    state.stop_reason = None
+    state.reopen_count += 1
     state.record(f"reopened: {reason.strip()[:100]}")
     save_state(paths, state)
     return load_workitem(paths, workitem_id)
@@ -215,6 +243,7 @@ def list_workitems(paths: AiPaths) -> list[str]:
 
 
 def set_active_id(paths: AiPaths, workitem_id: str) -> None:
+    paths.active_pointer.parent.mkdir(parents=True, exist_ok=True)
     paths.active_pointer.write_text(workitem_id + "\n", encoding="utf-8")
 
 
