@@ -96,18 +96,48 @@ Tudo o que competia com o OpenCode em orquestração/execução, e tudo o que ex
 
 ## 4. Desenho novo
 
-### 4.1 No OpenCode: `/create-plan`
+### 4.1 No OpenCode: `/create-plan` chama um agente próprio, isolado do `workitem-conductor` existente
 
-Novo command (`~/.config/opencode/commands/create-plan.md`), análogo a `implement-plan.md`. Conduz a conversa "frase genérica → plano estruturado" com o utilizador. O prompt do agente:
+`/create-plan` (`~/.config/opencode/commands/create-plan.md`) não reaproveita o agente `workitem-conductor` (o que hoje orquestra implementer/reviewer/tester/committer, sempre restrito ao `cwd`). Chama um **agente novo e dedicado**, ex. `~/.config/opencode/agents/plan-writer.md`, com um perfil de permissões próprio — o `workitem-conductor` e os seus subagentes ficam exatamente como estão hoje, sem qualquer alteração.
 
-- Sabe a estrutura obrigatória do corpo (Background, Goal, Out of scope, Tasks, Acceptance criteria, Risks) — a mesma que já se usa com sucesso hoje.
-- Sabe o frontmatter obrigatório (§5).
-- Antes de finalizar, corre `conductor plans list --sprint <sprint>` (ou equivalente) como comando bash — permitido no `permission.bash` do agente, mesmo padrão que já existe para `git status*: allow` — para saber que outros planos já existem e preencher `depends_on`/`related` corretamente, incluindo planos de outros repositórios.
-- Grava o ficheiro em `.ai/execution_plans/<data>_<slug>.md` no repositório certo.
+```yaml
+---
+description: Conducts a cross-repo planning conversation and writes execution_plans/*.md, with a distinct (broader) permission profile from the implementation agents
+mode: primary
+model: openai/gpt-5.5
+temperature: 0.1
+permission:
+  read: allow
+  glob: allow
+  grep: allow
+  list: allow
+  edit: deny            # escreve via bash, nunca edição direta — mesmo padrão que já usas no workitem-conductor.md
+  bash:
+    "*": ask             # cada escrita cross-repo passa por confirmação explícita, igual ao que já acontece hoje
+    "git status*": allow
+    "git diff*": allow
+    "git log*": allow
+    "conductor plans*": allow   # consulta o registo sem pedir confirmação a cada leitura
+  task: deny
+---
+```
 
-O `workitem-conductor` não participa desta conversa — só é consultado, passivamente, via linha de comando.
+Responsabilidades do prompt deste agente:
 
-### 4.2 No `workitem-conductor`: `conductor plans`
+- Recebe (ou lê de um ficheiro — ver §4.2) a brief de domínio, em vez de depender de o utilizador a colar de cada vez.
+- Conduz a conversa "descrição genérica → um ou mais planos", como já fazes hoje manualmente — incluindo, quando a análise identificar múltiplos repositórios afetados, escrever um plano por repositório na mesma sessão, todos com o mesmo `sprint:`.
+- Sabe a estrutura obrigatória do corpo (Background, Goal, Out of scope, Tasks, Acceptance criteria, Risks) e o frontmatter obrigatório (§5).
+- Corre `conductor plans list --sprint <sprint>` antes de finalizar, para saber que planos já existem no mesmo sprint e preencher `depends_on`/`related` corretamente — incluindo o `00-overview.md`, que passa a ser o primeiro ficheiro que esta própria conversa escreve (com `executable: false`), já com a tabela de planos filhos no frontmatter de cada um, em vez de reescrita à mão depois.
+
+O `workitem-conductor` (ferramenta Python) não participa desta conversa em nenhum momento — só é consultado, passivamente, via `conductor plans list` (leitura).
+
+### 4.2 Brief de domínio reutilizável (evita reescrever contexto arquitetural a cada conversa)
+
+Uma conversa real de arranque cross-repo (a que gerou a sprint `claim-values`) começa com uma brief extensa e valiosa — modelo de dados (application/service/coverage), papel de cada um dos ~10 repositórios envolvidos, restrições da legacy (data-layer, não tocar tabelas legacy), serviços externos (interface automations). Esta brief não muda por sprint, mas hoje é reescrita/colada à mão em cada conversa nova — com risco real de esquecer um detalhe.
+
+Proposta: capturar esta brief num ficheiro versionado (ex. `habit-tpaclaims-pyservice-layer/.ai/domain-brief.md`, ou um local central se fizer mais sentido para toda a plataforma habit) e o agente `plan-writer` referencia-o no arranque da conversa em vez de depender de o utilizador colar tudo de novo. Fica como item de acompanhamento, não bloqueante para o resto deste desenho.
+
+### 4.3 No `workitem-conductor`: `conductor plans`
 
 Substitui inteiramente o `Engine`/workitem lifecycle atual. Sub-comandos propostos:
 
@@ -159,7 +189,7 @@ O corpo do markdown **não é estruturado** — fica em prosa livre, exatamente 
 2. **`opencode.db` é um ficheiro local único, sem retenção conhecida.** Se o OpenCode alguma vez fizer vacuum/prune, perde-se histórico. Precisa de um export periódico independente desta pivot — vale a pena tratar como item separado, não bloqueante.
 3. **`id` como chave** — hoje os planos já usam nomes de ficheiro datados como identidade natural (`2026-07-15_...`). O `id` do frontmatter pode ser derivado do nome do ficheiro por omissão (menos fricção ao escrever) com override manual só quando necessário.
 4. **Migração dos 20 planos já existentes na sprint `claim-values`** não têm frontmatter — precisam de ser retro-adaptados manualmente ou por um script de migração one-off (não vale a pena automatizar isto de forma sofisticada, é um custo único).
-5. **O `/create-plan` no OpenCode precisa de permissão de leitura cross-repo** para consultar `conductor plans list` de outros repositórios sensatamente — confirmar que o padrão de permissões atual (`bash: {"*": ask}`) não vai gerar demasiados prompts de confirmação na prática.
+5. **Resolvido**: o `/create-plan` chama um agente `plan-writer` dedicado (§4.1), com escrita cross-repo via `bash: ask` (nunca `edit: allow`) — o `workitem-conductor` e os seus subagentes de implementação ficam inalterados, sem qualquer aumento de raio de ação. Falta só confirmar na prática se o padrão `bash: ask` gera confirmações a mais quando uma sessão escreve vários planos de seguida — se sim, considerar `"cat > */.ai/execution_plans/*": allow` como exceção pontual, mantendo tudo o resto pedido.
 
 ---
 
