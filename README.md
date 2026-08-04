@@ -100,11 +100,12 @@ conductor workspace list
 ### `conductor plans`
 
 ```bash
-conductor plans list [--sprint NAME] [--repo NAME] [-w WORKSPACE]
+conductor plans list [--sprint NAME] [--repo NAME] [-w WORKSPACE] [--with-execution]
 conductor plans ready [-w WORKSPACE]           # ready + every dependency already done
 conductor plans lint [PLAN_ID] [-w WORKSPACE]  # dependency/cycle/evidence checks
 conductor plans mark PLAN_ID ready
 conductor plans mark PLAN_ID done --commit SHA
+conductor plans sync [PLAN_ID] [-w WORKSPACE] [--db PATH]  # correlate with opencode.db sessions
 conductor plans table [--sprint NAME] [-w WORKSPACE]  # markdown table for a PR
 ```
 
@@ -123,6 +124,24 @@ marked `external_handoff: true` (handed to a team without access to the
 repos it depends on) — that every dependency it names also has an inline
 summary in the plan's own body, not just a bare reference.
 
+`plans sync` correlates a plan with the OpenCode sessions that executed it,
+by looking for an exact `PLAN_ID: <id>` marker that OpenCode's
+`implement-plan.md` command already injects into the executing agent's
+messages — recorded in `~/.local/share/opencode/opencode.db`, which
+`conductor` reads read-only and never writes to. It also pulls in the
+matched sessions' direct subagent children (`implementer`/`reviewer`/
+`tester`/`committer`), since that's where most of the token/cost usage
+actually is. The result is written as a normalized snapshot to
+`~/.local/share/conductor/plans/<id>/opencode-sessions.json` — a point-in-time
+copy, not a live query, so it survives independently of `opencode.db`'s own
+schema or retention. `plans list --with-execution` reads that snapshot (never
+`opencode.db` directly) to show session counts and token totals. A plan with
+no matching sessions syncs cleanly to an empty snapshot rather than erroring
+— absence of evidence is itself meaningful, not a bug. Note: `cost` is
+currently `0.0` for every session regardless of provider (the accounts in use
+here don't report it) — token counts are the reliable signal; don't read a
+`$0.00` total as "this was free."
+
 ## What this project deliberately does not do
 
 - **No LLM calls, ever.** Plan authoring happens in a separate tool/
@@ -135,11 +154,10 @@ summary in the plan's own body, not just a bare reference.
   version of this project had all of that — see
   `docs/audit-layer-pivot.md` §1 for why it was cut rather than kept
   around "just in case."
-- **No live dependency on OpenCode's own session database.** Correlating a
-  plan to the OpenCode sessions that executed it (cost, model, tokens) is a
-  planned addition (`conductor plans sync`, not yet built) that will snapshot
-  that data into `conductor`'s own storage rather than reading it live —
-  see the design doc's §4.3/§7 for why.
+- **No live dependency on OpenCode's own session database.** `conductor
+  plans sync` reads `opencode.db` read-only and snapshots the result into
+  `conductor`'s own storage — nothing else in this tool ever queries it
+  live. See the design doc's §4.3/§7 for why.
 
 ## Development
 

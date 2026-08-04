@@ -17,7 +17,9 @@ from rich.console import Console
 from rich.table import Table
 
 from .plans.lint import lint_plans, ready_to_execute
+from .plans.opencode_db import OpenCodeDbNotFound
 from .plans.scan import resolve_repos, scan_repos
+from .plans.sync import read_snapshot, sync_plan
 from .plans.write import PlanFileError, mark_done, mark_ready
 from .workspaces import (
     DEFAULT_WORKSPACE,
@@ -144,6 +146,9 @@ def plans_list(
     sprint: str = typer.Option(None, "--sprint", help="Only plans in this sprint."),
     repo: str = typer.Option(None, "--repo", help="Only plans in this repo."),
     workspace: str = typer.Option(None, "--workspace", "-w", help="Registered workspace to scan (default: all)."),
+    with_execution: bool = typer.Option(
+        False, "--with-execution", help="Add columns from the last `plans sync` snapshot (sessions, tokens)."
+    ),
 ) -> None:
     """List execution plans across registered repos (plus cwd)."""
     plans, warnings = _scan(workspace, repo)
@@ -161,6 +166,10 @@ def plans_list(
     table.add_column("status")
     table.add_column("depends_on", style="dim")
     table.add_column("commits", style="dim")
+    if with_execution:
+        table.add_column("sessions", justify="right")
+        table.add_column("tokens", justify="right")
+    missing_snapshot = False
     for p in sorted(plans, key=lambda p: (p.repo, p.id)):
         fm = p.frontmatter
         status_style = {
@@ -171,15 +180,28 @@ def plans_list(
             "done": "green",
             "canceled": "dim strike",
         }.get(fm.status, "")
-        table.add_row(
+        row = [
             fm.id,
             p.repo,
             fm.sprint or "",
             f"[{status_style}]{fm.status}[/{status_style}]" if status_style else fm.status,
             ", ".join(fm.depends_on),
             ", ".join(fm.commits),
-        )
+        ]
+        if with_execution:
+            snap = read_snapshot(fm.id)
+            if snap is None:
+                missing_snapshot = True
+                row += ["[dim]-[/dim]", "[dim]-[/dim]"]
+            else:
+                row += [
+                    str(snap.totals.session_count),
+                    f"{snap.totals.tokens_input}+{snap.totals.tokens_output}",
+                ]
+        table.add_row(*row)
     console.print(table)
+    if with_execution and missing_snapshot:
+        console.print("[dim]Run `conductor plans sync` for execution data on the plans marked '-'.[/dim]")
 
 
 @plans_app.command("ready")
@@ -245,6 +267,42 @@ def plans_mark(
         err_console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1) from exc
     console.print(f"[green]{plan_id}[/green] → {status}")
+
+
+@plans_app.command("sync")
+def plans_sync(
+    plan_id: str = typer.Argument(None, help="Only sync this plan id (default: everything found)."),
+    workspace: str = typer.Option(None, "--workspace", "-w"),
+    repo: str = typer.Option(None, "--repo"),
+    db: str = typer.Option(None, "--db", help="Path to opencode.db (default: ~/.local/share/opencode/opencode.db)."),
+) -> None:
+    """Correlate plans with opencode.db sessions (via the PLAN_ID: marker) and snapshot the result."""
+    plans, warnings = _scan(workspace, repo)
+    _print_warnings(warnings)
+    if plan_id is not None:
+        plans = [p for p in plans if p.id == plan_id]
+        if not plans:
+            err_console.print(f"[red]No plan with id '{plan_id}' found.[/red]")
+            raise typer.Exit(code=1)
+    if not plans:
+        console.print("[dim]No plans found.[/dim]")
+        return
+
+    db_path = Path(db) if db else None
+    for p in sorted(plans, key=lambda p: (p.repo, p.id)):
+        try:
+            snap = sync_plan(p, db_path=db_path)
+        except OpenCodeDbNotFound as exc:
+            err_console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1) from exc
+        if snap.matched_via == "none":
+            console.print(f"[dim]{p.id} — no matching sessions found[/dim]")
+        else:
+            t = snap.totals
+            console.print(
+                f"[green]{p.id}[/green] — {t.session_count} sessions, "
+                f"{t.tokens_input}+{t.tokens_output} tokens (marker)"
+            )
 
 
 @plans_app.command("table")

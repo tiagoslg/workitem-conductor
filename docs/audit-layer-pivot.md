@@ -231,8 +231,8 @@ Campo em aberto, ainda não decidido: `repos_affected: [{repo, role}]` (papel po
 
 Ordem por onde a dor é maior primeiro — não faz sentido construir `export-audit`/grafo/integração CI antes de a tabela manual estar resolvida:
 
-1. **Registo** — `PlanFrontmatter` (pydantic), scanner de `.ai/execution_plans/**/*.md`, `plans list`, `plans lint`, `plans mark ready`/`mark done`, `plans table`. Sem `opencode.db` ainda. Já substitui a tabela mantida à mão — é o suficiente para ser útil sozinho.
-2. **Correlação** — `PLAN_ID:` no `implement-plan.md`, `plans sync` (descobre + normaliza + snapshot em `data_home()`), `plans list --with-execution` (custo/modelo/sessões).
+1. **Registo — feito** (commits `52a88fd`/`086ceab`, mergeado em `main` 2026-08-04). `PlanFrontmatter` (pydantic), scanner de `.ai/execution_plans/**/*.md`, `plans list`, `plans lint`, `plans mark ready`/`mark done`, `plans table`.
+2. **Correlação — feito** (2026-08-04). `PLAN_ID:` já injetado por `implement-plan.md` e confirmado ao vivo em sessões reais de produção. `plans sync [<id>]` lê `opencode.db` só para leitura (nunca escreve), procura o marcador exato por plano, junta as sessões-filho diretas (subagentes `implementer`/`reviewer`/`tester`/`committer`) e grava um snapshot normalizado em `data_home()/conductor/plans/<id>/opencode-sessions.json` — nunca uma query ao vivo. `plans list --with-execution` lê só esse snapshot. Testado contra dados reais: `decision-reason-dropdown` correlacionou corretamente 19 sessões (1 pai + 18 subagentes) com ~20,4M tokens. Nota: `cost` está a `0.0` para todas as sessões neste setup de contas — o sinal fiável são os tokens, não o custo. Não incluído nesta ronda: fallback por substring de path para planos antigos sem marcador (`matched_via: "none"` fica honesto em vez de adivinhar) — fica para depois, se necessário.
 3. **Auditoria** — `export-audit --plan <id>`/`--sprint <nome>` (planos + sessões correlacionadas + commits + grafo de dependências).
 
 `plans graph` pode nascer em qualquer um destes passos, conforme a necessidade concreta de visualizar dependências aparecer primeiro.
