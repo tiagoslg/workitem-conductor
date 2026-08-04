@@ -1,3 +1,3 @@
-"""workitem-conductor: a local conductor for AI-assisted development workflows."""
+"""workitem-conductor: a local control-plane/audit layer for execution_plans/*.md files."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

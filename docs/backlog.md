@@ -1,5 +1,7 @@
 # Backlog
 
+> **Superseded 2026-07-17 by [`docs/audit-layer-pivot.md`](audit-layer-pivot.md).** Kept as historical record only.
+
 Move items from **Next** → **Done** in the same commit that ships the feature.
 
 ---

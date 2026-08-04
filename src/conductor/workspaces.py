@@ -108,27 +108,6 @@ def remove_project(
     return removed
 
 
-def workspace_dir(name: str) -> Path:
-    """Return the curated-config directory for a named workspace.
-
-    Holds ``config.yml``, ``instructions.md``, ``roles/``, ``flows/`` — the
-    workspace-level equivalent of a repo's ``.ai/``. Runtime state (workitems,
-    active-workitem pointer) lives elsewhere, under the central data home; see
-    ``WorkspacePaths.data_dir``.
-    """
-    return config_home() / "conductor" / "workspaces" / name
-
-
-def load_workspace_paths(name: str) -> "WorkspacePaths":
-    """Resolve a named workspace into a WorkspacePaths ready to use."""
-    from .paths import WorkspacePaths
-
-    registry = load_registry()
-    ws = registry.workspaces.get(name)
-    project_roots = [Path(p) for p in (ws.paths if ws else [])]
-    return WorkspacePaths(root=workspace_dir(name), name=name, project_roots=project_roots)
-
-
 def list_projects(
     registry: WorkspaceRegistry, workspace: str | None = None
 ) -> list[str]:

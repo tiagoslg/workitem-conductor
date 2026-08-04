@@ -2,7 +2,7 @@
 
 This document summarizes the current thinking behind `workitem-conductor` so a local coding agent can continue the implementation from a clear starting point.
 
-> **Note:** this is the original design brief, written before implementation started. Some of it (notably the `.ai/`-relative runtime layout below) has since changed — runtime state (workitems, worktrees, active-workitem pointer) now lives under a central data home outside the repo, not under `.ai/`. See `README.md` ("What `init` writes") for the current layout and `docs/backlog-adjusted.md` for where this is headed next.
+> **Superseded 2026-07-17 by [`docs/audit-layer-pivot.md`](audit-layer-pivot.md).** This was the original design brief (a coding-role orchestrator calling Codex/Claude/Ollama CLIs directly), written before implementation started. That whole direction was cut — see the pivot doc for why and what replaced it. Kept here as historical record only.
 
 ## Project name
 

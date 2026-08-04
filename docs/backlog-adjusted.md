@@ -1,3 +1,5 @@
+> **Superado em 2026-07-17 por [`docs/audit-layer-pivot.md`](audit-layer-pivot.md).** Este backlog (M1-M13) descreve o motor de orquestração antigo (`Engine`/`Flow`/`Strategy`/roles), que foi cortado por completo — o projeto passou a ser uma camada de registo/auditoria sobre `execution_plans/*.md`. Mantido aqui só como histórico de como se chegou até à decisão de cortar.
+
 Claro — aqui está o **backlog completo consolidado** do `workitem-conductor`, já considerando tudo que decidimos:
 
 * workitems fora do projeto;
