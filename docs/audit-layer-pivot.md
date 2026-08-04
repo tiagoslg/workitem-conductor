@@ -205,8 +205,13 @@ o `implement-plan.md` nunca a lia, então nada impedia o `workitem-conductor`
 de avançar silenciosamente numa branch errada quando o humano esquecia de
 mudar de branch antes de correr `/implement-plan`. Agora é um campo de
 frontmatter; `implement-plan.md` lê-o e compara com `git branch
---show-current` antes de qualquer implementação (ver §6, passo 0) — nunca
-faz `checkout` sozinho, só pára e pergunta se não bater certo.
+--show-current` antes de qualquer implementação (ver §6, passo 0). Refinado
+2026-08-04: se a branch do plano não existir ainda (caso comum — criar a
+branch é muitas vezes a própria Task 1 do plano, e nenhum agente tem
+permissão para o fazer sozinho fora deste passo), o `workitem-conductor`
+propõe criá-la a partir da atual, só com confirmação explícita — nunca em
+silêncio. Se já existir mas não for a atual, continua a parar e perguntar,
+nunca troca de branch sozinho (pode ter histórico não relacionado).
 
 O corpo do markdown **não é estruturado** — fica em prosa livre, exatamente como já se escreve hoje. Só o índice (frontmatter) é máquina-legível. Isto evita repetir o erro do `PlannerPhase` do código antigo (forçar texto livre a YAML rígido).
 
@@ -219,7 +224,7 @@ Campo em aberto, ainda não decidido: `repos_affected: [{repo, role}]` (papel po
 1. **Início** — problema/card genérico. No OpenCode: `/create-plan "melhorar o cálculo dos valores da claim" --repo habit-tpaclaims-pyservice-layer --sprint claim-values` (ou equivalente). Conversa até convergir no ficheiro final, frontmatter incluído.
 2. **Registo** — nada a fazer explicitamente; `conductor plans list` varre o ficheiro assim que existe.
 3. **Antes de executar** — `conductor plans ready --sprint claim-values` mostra o que já pode arrancar (dependências satisfeitas). `conductor plans lint` valida autossuficiência antes de entregar a outra equipa.
-4. **Execução** — `/implement-plan` no OpenCode, sem alterações, sem o conductor no meio. Passo 0 do comando: se o plano tiver `branch` no frontmatter, compara com a branch atual (`git branch --show-current`) e pára a pedir confirmação se não bater certo — nunca faz `checkout` sozinho.
+4. **Execução** — `/implement-plan` no OpenCode, sem alterações, sem o conductor no meio. Passo 0 do comando: se o plano tiver `branch` no frontmatter e ela não bater com a atual, verifica se já existe — se não existir, propõe criá-la a partir da atual (`git checkout -b`, só com confirmação explícita); se já existir, pára e pergunta em vez de mudar sozinho (uma branch existente pode ter histórico não relacionado).
 5. **Depois de executar** — `conductor plans mark <id> done --commit <sha>`.
 6. **Reporting/auditoria** — `conductor plans table`/`conductor plans sync`/`conductor export-audit`.
 

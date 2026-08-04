@@ -79,8 +79,11 @@ tool writes `ready` or `done` on its own.
 
 `branch`, when set, is the git branch this plan is meant to execute on.
 OpenCode's `implement-plan.md` command reads it and compares it against the
-checked-out branch before doing any implementation work, stopping to ask if
-they don't match — it never checks out a branch on its own.
+checked-out branch before doing any implementation work. If the branch
+doesn't exist yet, it offers to create it off the current branch — with
+explicit confirmation, never silently. If it exists but isn't checked out,
+it stops and asks instead of switching on its own (an existing branch may
+carry unrelated history).
 
 ## Install
 
