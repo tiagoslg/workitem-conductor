@@ -184,6 +184,7 @@ schema_version: 1                    # evolução do formato sem dor — nunca s
 id: claim-values-05-bugfixes         # slug estável, independente da data no filename
 sprint: claim-values                  # agrupa planos da mesma iniciativa; opcional
 primary_repo: habit-tpaclaims-pyservice-layer
+branch: feat/claim-value-calculation  # git branch this plan is meant to execute on; null if undecided
 status: draft | ready | in_progress | blocked | done | canceled
 # draft = ainda a ser desenhado; ready = aprovado, pronto a executar (substitui o antigo "approve")
 executable: true                      # false para ficheiros de índice (ex. "-00-overview.md")
@@ -198,6 +199,15 @@ completed_at: null                    # idem, por `plans mark done`
 ---
 ```
 
+`branch` (adicionado 2026-08-04): antes disto vivia só como prosa livre
+(`**Branch:** ...`) no corpo do plano, sem estrutura nem obrigatoriedade —
+o `implement-plan.md` nunca a lia, então nada impedia o `workitem-conductor`
+de avançar silenciosamente numa branch errada quando o humano esquecia de
+mudar de branch antes de correr `/implement-plan`. Agora é um campo de
+frontmatter; `implement-plan.md` lê-o e compara com `git branch
+--show-current` antes de qualquer implementação (ver §6, passo 0) — nunca
+faz `checkout` sozinho, só pára e pergunta se não bater certo.
+
 O corpo do markdown **não é estruturado** — fica em prosa livre, exatamente como já se escreve hoje. Só o índice (frontmatter) é máquina-legível. Isto evita repetir o erro do `PlannerPhase` do código antigo (forçar texto livre a YAML rígido).
 
 Campo em aberto, ainda não decidido: `repos_affected: [{repo, role}]` (papel por repositório, herdado do schema do V4/V5 — §1.6/§7). Fica preparado no schema mas não obrigatório nesta versão.
@@ -209,7 +219,7 @@ Campo em aberto, ainda não decidido: `repos_affected: [{repo, role}]` (papel po
 1. **Início** — problema/card genérico. No OpenCode: `/create-plan "melhorar o cálculo dos valores da claim" --repo habit-tpaclaims-pyservice-layer --sprint claim-values` (ou equivalente). Conversa até convergir no ficheiro final, frontmatter incluído.
 2. **Registo** — nada a fazer explicitamente; `conductor plans list` varre o ficheiro assim que existe.
 3. **Antes de executar** — `conductor plans ready --sprint claim-values` mostra o que já pode arrancar (dependências satisfeitas). `conductor plans lint` valida autossuficiência antes de entregar a outra equipa.
-4. **Execução** — `/implement-plan` no OpenCode, sem alterações, sem o conductor no meio.
+4. **Execução** — `/implement-plan` no OpenCode, sem alterações, sem o conductor no meio. Passo 0 do comando: se o plano tiver `branch` no frontmatter, compara com a branch atual (`git branch --show-current`) e pára a pedir confirmação se não bater certo — nunca faz `checkout` sozinho.
 5. **Depois de executar** — `conductor plans mark <id> done --commit <sha>`.
 6. **Reporting/auditoria** — `conductor plans table`/`conductor plans sync`/`conductor export-audit`.
 

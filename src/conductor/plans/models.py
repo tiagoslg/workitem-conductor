@@ -34,6 +34,7 @@ class PlanFrontmatter(BaseModel):
     id: str
     sprint: str | None = None
     primary_repo: str
+    branch: str | None = None
     status: Status = "draft"
     executable: bool = True
     commits: list[str] = []

@@ -77,6 +77,13 @@ def test_planfrontmatter_coerces_bare_yaml_dates():
     assert fm2.created_at == "2026-07-17"
 
 
+def test_planfrontmatter_branch_defaults_to_none_and_round_trips():
+    fm = PlanFrontmatter.model_validate({"id": "x", "primary_repo": "r"})
+    assert fm.branch is None
+    fm2 = PlanFrontmatter.model_validate({"id": "x", "primary_repo": "r", "branch": "feat/my-branch"})
+    assert fm2.branch == "feat/my-branch"
+
+
 # ---------------------------------------------------------------------------
 # scan
 # ---------------------------------------------------------------------------

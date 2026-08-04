@@ -30,6 +30,7 @@ schema_version: 1
 id: fix-duplicate-quote-properties
 sprint: null
 primary_repo: my-service
+branch: null
 status: draft
 executable: true
 commits: []
@@ -75,6 +76,11 @@ needs, for no analytical benefit.
 execute) → `in_progress` → `done` (or `blocked`/`canceled`). Only a human,
 or `conductor plans mark`, moves a plan out of `draft` — nothing in this
 tool writes `ready` or `done` on its own.
+
+`branch`, when set, is the git branch this plan is meant to execute on.
+OpenCode's `implement-plan.md` command reads it and compares it against the
+checked-out branch before doing any implementation work, stopping to ask if
+they don't match — it never checks out a branch on its own.
 
 ## Install
 
